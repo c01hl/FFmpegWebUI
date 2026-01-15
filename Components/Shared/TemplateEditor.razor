@@ -1,0 +1,458 @@
+@using FFmpegWebUI.Models
+@using FFmpegWebUI.Services
+@inject ITemplateService TemplateService
+
+<div class="template-editor @(_isVisible ? "visible" : "")">
+    <div class="editor-overlay" @onclick="Close"></div>
+    <div class="editor-panel">
+        <div class="editor-header">
+            <h2>@(_isEditing ? "编辑模板" : "创建模板")</h2>
+            <button class="close-btn" @onclick="Close">✕</button>
+        </div>
+
+        <div class="editor-body">
+            <div class="form-group @(HasError("Name") ? "has-error" : "")">
+                <label>模板名称 *</label>
+                <input type="text" @bind="_template.Name" @ref="_nameInput" placeholder="输入模板名称" />
+                @if (HasError("Name"))
+                {
+                    <span class="field-error">@GetError("Name")</span>
+                }
+            </div>
+
+            <div class="form-group">
+                <label>描述</label>
+                <textarea @bind="_template.Description" placeholder="输入模板描述" rows="2"></textarea>
+            </div>
+
+            <div class="form-group @(HasError("Category") ? "has-error" : "")">
+                <label>分类 *</label>
+                <input type="text" @bind="_template.Category" @ref="_categoryInput" placeholder="如：视频转码、音频提取" list="categories" />
+                <datalist id="categories">
+                    @foreach (var cat in _existingCategories)
+                    {
+                        <option value="@cat" />
+                    }
+                </datalist>
+                @if (HasError("Category"))
+                {
+                    <span class="field-error">@GetError("Category")</span>
+                }
+            </div>
+
+            <div class="form-group @(HasError("CommandArgs") ? "has-error" : "")">
+                <label>FFmpeg 命令参数 *</label>
+                <textarea @bind="_template.CommandArgs" @ref="_commandArgsInput" placeholder="-i &quot;{input}&quot; -c:v libx264 -crf 23 &quot;{output}&quot;" rows="4"></textarea>
+                <span class="help-text">
+                    可用占位符：{"{input}"} 输入文件, {"{output}"} 输出文件, {"{encoder}"} 编码器
+                </span>
+                @if (HasError("CommandArgs"))
+                {
+                    <span class="field-error">@GetError("CommandArgs")</span>
+                }
+            </div>
+
+            <div class="form-row">
+                <div class="form-group half @(HasError("OutputExtension") ? "has-error" : "")">
+                    <label>输出扩展名 *</label>
+                    <input type="text" @bind="_template.OutputExtension" @ref="_outputExtInput" placeholder="如：mp4" />
+                    @if (HasError("OutputExtension"))
+                    {
+                        <span class="field-error">@GetError("OutputExtension")</span>
+                    }
+                </div>
+
+                <div class="form-group half">
+                    <label>排序权重</label>
+                    <input type="number" @bind="_template.SortOrder" />
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>支持的输入格式（可选，逗号分隔）</label>
+                <input type="text" @bind="_inputFormatsText" placeholder="mp4, avi, mkv" />
+            </div>
+
+            <div class="form-group checkbox">
+                <label>
+                    <input type="checkbox" @bind="_template.RequiresHardwareAcceleration" />
+                    需要硬件加速
+                </label>
+            </div>
+
+            @if (_template.RequiresHardwareAcceleration)
+            {
+                <div class="form-group">
+                    <label>所需编码器</label>
+                    <select @bind="_template.RequiredEncoder">
+                        <option value="">选择编码器</option>
+                        <option value="h264_nvenc">NVIDIA NVENC H.264</option>
+                        <option value="hevc_nvenc">NVIDIA NVENC H.265</option>
+                        <option value="h264_qsv">Intel QSV H.264</option>
+                        <option value="hevc_qsv">Intel QSV H.265</option>
+                        <option value="h264_amf">AMD AMF H.264</option>
+                        <option value="hevc_amf">AMD AMF H.265</option>
+                    </select>
+                </div>
+            }
+
+            @if (!string.IsNullOrEmpty(_saveError))
+            {
+                <div class="error-message">@_saveError</div>
+            }
+        </div>
+
+        <div class="editor-footer">
+            <button class="btn-secondary" @onclick="Close">取消</button>
+            <button class="btn-primary" @onclick="Save" disabled="@_isSaving">
+                @(_isSaving ? "保存中..." : "保存")
+            </button>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public EventCallback OnSaved { get; set; }
+
+    private CommandTemplate _template = new();
+    private bool _isVisible;
+    private bool _isEditing;
+    private bool _isSaving;
+    private string _saveError = string.Empty;
+    private string _inputFormatsText = string.Empty;
+    private List<string> _existingCategories = [];
+    
+    // 字段错误
+    private Dictionary<string, string> _fieldErrors = [];
+    
+    // 输入框引用
+    private ElementReference _nameInput;
+    private ElementReference _categoryInput;
+    private ElementReference _commandArgsInput;
+    private ElementReference _outputExtInput;
+    
+    private bool HasError(string field) => _fieldErrors.ContainsKey(field);
+    private string GetError(string field) => _fieldErrors.TryGetValue(field, out var error) ? error : string.Empty;
+
+    public async Task OpenForCreate()
+    {
+        _template = new CommandTemplate();
+        _inputFormatsText = string.Empty;
+        _isEditing = false;
+        _saveError = string.Empty;
+        _fieldErrors.Clear();
+        await LoadCategories();
+        _isVisible = true;
+        StateHasChanged();
+    }
+
+    public async Task OpenForEdit(CommandTemplate template)
+    {
+        _template = new CommandTemplate
+        {
+            Id = template.Id,
+            Name = template.Name,
+            Description = template.Description,
+            Category = template.Category,
+            CommandArgs = template.CommandArgs,
+            OutputExtension = template.OutputExtension,
+            SupportedInputFormats = [.. template.SupportedInputFormats],
+            RequiresHardwareAcceleration = template.RequiresHardwareAcceleration,
+            RequiredEncoder = template.RequiredEncoder,
+            SortOrder = template.SortOrder
+        };
+        _inputFormatsText = string.Join(", ", template.SupportedInputFormats);
+        _isEditing = true;
+        _saveError = string.Empty;
+        _fieldErrors.Clear();
+        await LoadCategories();
+        _isVisible = true;
+        StateHasChanged();
+    }
+
+    private async Task LoadCategories()
+    {
+        _existingCategories = await TemplateService.GetCategoriesAsync();
+    }
+
+    private async Task Save()
+    {
+        _saveError = string.Empty;
+        _fieldErrors.Clear();
+        
+        // 验证并收集所有错误
+        if (string.IsNullOrWhiteSpace(_template.Name))
+        {
+            _fieldErrors["Name"] = "请输入模板名称";
+        }
+        if (string.IsNullOrWhiteSpace(_template.Category))
+        {
+            _fieldErrors["Category"] = "请输入模板分类";
+        }
+        if (string.IsNullOrWhiteSpace(_template.CommandArgs))
+        {
+            _fieldErrors["CommandArgs"] = "请输入 FFmpeg 命令参数";
+        }
+        if (string.IsNullOrWhiteSpace(_template.OutputExtension))
+        {
+            _fieldErrors["OutputExtension"] = "请输入输出扩展名";
+        }
+
+        // 如果有错误，聚焦到第一个错误字段
+        if (_fieldErrors.Count > 0)
+        {
+            StateHasChanged();
+            await FocusFirstError();
+            return;
+        }
+
+        // 解析输入格式
+        _template.SupportedInputFormats = _inputFormatsText
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(f => f.TrimStart('.').ToLower())
+            .ToList();
+
+        _isSaving = true;
+
+        try
+        {
+            if (_isEditing)
+            {
+                var success = await TemplateService.UpdateTemplateAsync(_template);
+                if (!success)
+                {
+                    _saveError = "更新失败，系统模板不可编辑";
+                    _isSaving = false;
+                    return;
+                }
+            }
+            else
+            {
+                await TemplateService.CreateTemplateAsync(_template);
+            }
+
+            _isVisible = false;
+            await OnSaved.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            _saveError = $"保存失败: {ex.Message}";
+        }
+        finally
+        {
+            _isSaving = false;
+        }
+    }
+
+    private async Task FocusFirstError()
+    {
+        await Task.Delay(50); // 等待 DOM 更新
+        
+        if (_fieldErrors.ContainsKey("Name"))
+            await _nameInput.FocusAsync();
+        else if (_fieldErrors.ContainsKey("Category"))
+            await _categoryInput.FocusAsync();
+        else if (_fieldErrors.ContainsKey("CommandArgs"))
+            await _commandArgsInput.FocusAsync();
+        else if (_fieldErrors.ContainsKey("OutputExtension"))
+            await _outputExtInput.FocusAsync();
+    }
+
+    private void Close()
+    {
+        _isVisible = false;
+        _fieldErrors.Clear();
+    }
+}
+
+<style>
+    .template-editor {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 1000;
+    }
+
+    .template-editor.visible {
+        display: block;
+    }
+
+    .editor-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+    }
+
+    .editor-panel {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 90%;
+        max-width: 600px;
+        max-height: 90vh;
+        background: var(--card-bg, white);
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        color: var(--text-primary, #333);
+    }
+
+    .editor-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.5rem;
+        border-bottom: 1px solid var(--border-color, #ddd);
+        background: var(--light-bg, #f8f9fa);
+    }
+
+    .editor-header h2 {
+        margin: 0;
+        font-size: 1.25rem;
+        color: var(--text-primary, #333);
+    }
+
+    .close-btn {
+        background: none;
+        border: none;
+        font-size: 1.5rem;
+        cursor: pointer;
+        color: var(--text-secondary, #666);
+    }
+
+    .close-btn:hover {
+        color: var(--text-primary, #333);
+    }
+
+    .editor-body {
+        flex: 1;
+        padding: 1.5rem;
+        overflow-y: auto;
+    }
+
+    .form-group {
+        margin-bottom: 1rem;
+    }
+
+    .form-group label {
+        display: block;
+        font-weight: 500;
+        margin-bottom: 0.5rem;
+        color: var(--text-primary, #333);
+    }
+
+    .form-group input,
+    .form-group textarea,
+    .form-group select {
+        width: 100%;
+        padding: 0.6rem;
+        border: 1px solid var(--border-color, #ddd);
+        border-radius: 4px;
+        font-size: 0.95rem;
+        background: var(--input-bg, white);
+        color: var(--text-primary, #333);
+    }
+
+    .form-group input::placeholder,
+    .form-group textarea::placeholder {
+        color: var(--text-muted, #888);
+    }
+
+    .form-group.checkbox label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        cursor: pointer;
+    }
+
+    .form-group.checkbox input {
+        width: auto;
+    }
+
+    .form-row {
+        display: flex;
+        gap: 1rem;
+    }
+
+    .form-group.half {
+        flex: 1;
+    }
+
+    .help-text {
+        display: block;
+        font-size: 0.8rem;
+        color: var(--text-muted, #888);
+        margin-top: 0.25rem;
+    }
+
+    .form-group.has-error input,
+    .form-group.has-error textarea,
+    .form-group.has-error select {
+        border-color: #dc3545;
+        background-color: #fff8f8;
+    }
+
+    .field-error {
+        display: block;
+        font-size: 0.85rem;
+        color: #dc3545;
+        margin-top: 0.25rem;
+    }
+
+    .error-message {
+        padding: 0.75rem;
+        background: #f8d7da;
+        color: #721c24;
+        border-radius: 4px;
+    }
+
+    .editor-footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.75rem;
+        padding: 1rem 1.5rem;
+        border-top: 1px solid var(--border-color, #ddd);
+        background: var(--light-bg, #f8f9fa);
+    }
+
+    .btn-primary,
+    .btn-secondary {
+        padding: 0.6rem 1.5rem;
+        border-radius: 4px;
+        font-size: 0.95rem;
+        cursor: pointer;
+    }
+
+    .btn-primary {
+        background: #007bff;
+        color: white;
+        border: none;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+        background: #0056b3;
+    }
+
+    .btn-primary:disabled {
+        background: #ccc;
+    }
+
+    .btn-secondary {
+        background: var(--light-bg, #f8f9fa);
+        border: 1px solid var(--border-color, #ddd);
+        color: var(--text-primary, #333);
+    }
+
+    .btn-secondary:hover {
+        background: var(--card-bg, #e9ecef);
+    }
+</style>

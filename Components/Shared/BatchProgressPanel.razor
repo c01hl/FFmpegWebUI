@@ -1,0 +1,308 @@
+@using FFmpegWebUI.Models
+
+<div class="batch-progress-panel">
+    <div class="panel-header">
+        <h3>📊 批量处理进度</h3>
+        <span class="overall-status @GetOverallStatusClass()">
+            @GetOverallStatusText()
+        </span>
+    </div>
+
+    <div class="overall-progress">
+        <div class="progress-info">
+            <span>已完成: @CompletedCount / @TotalCount</span>
+            <span>@OverallPercentage.ToString("F0")%</span>
+        </div>
+        <div class="progress-track">
+            <div class="progress-fill completed" style="width: @CompletedPercentage%"></div>
+            <div class="progress-fill failed" style="width: @FailedPercentage%"></div>
+            <div class="progress-fill running" style="width: @RunningPercentage%"></div>
+        </div>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-item">
+            <span class="stat-value">@TotalCount</span>
+            <span class="stat-label">总计</span>
+        </div>
+        <div class="stat-item completed">
+            <span class="stat-value">@CompletedCount</span>
+            <span class="stat-label">已完成</span>
+        </div>
+        <div class="stat-item failed">
+            <span class="stat-value">@FailedCount</span>
+            <span class="stat-label">失败</span>
+        </div>
+        <div class="stat-item pending">
+            <span class="stat-value">@PendingCount</span>
+            <span class="stat-label">等待中</span>
+        </div>
+    </div>
+
+    @if (CurrentTask != null)
+    {
+        <div class="current-task">
+            <h4>当前处理</h4>
+            <div class="task-name">@Path.GetFileName(CurrentTask.InputPath)</div>
+            <div class="task-progress">
+                <div class="progress-track small">
+                    <div class="progress-fill running" style="width: @CurrentTask.Progress%"></div>
+                </div>
+                <span>@CurrentTask.Progress.ToString("F1")%</span>
+            </div>
+            @if (CurrentTask.ProcessingSpeed.HasValue)
+            {
+                <div class="task-speed">速度: @CurrentTask.ProcessingSpeed.Value.ToString("F2")x</div>
+            }
+        </div>
+    }
+
+    @if (FailedTasks.Count > 0)
+    {
+        <div class="failed-tasks">
+            <h4>❌ 失败任务 (@FailedTasks.Count)</h4>
+            @foreach (var task in FailedTasks.Take(5))
+            {
+                <div class="failed-item">
+                    <span class="failed-name">@Path.GetFileName(task.InputPath)</span>
+                    <span class="failed-reason">@task.ErrorMessage</span>
+                </div>
+            }
+            @if (FailedTasks.Count > 5)
+            {
+                <div class="more-failed">还有 @(FailedTasks.Count - 5) 个失败任务...</div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public int TotalCount { get; set; }
+
+    [Parameter]
+    public int CompletedCount { get; set; }
+
+    [Parameter]
+    public int FailedCount { get; set; }
+
+    [Parameter]
+    public int RunningCount { get; set; }
+
+    [Parameter]
+    public ConversionTask? CurrentTask { get; set; }
+
+    [Parameter]
+    public List<ConversionTask> FailedTasks { get; set; } = [];
+
+    [Parameter]
+    public bool IsProcessing { get; set; }
+
+    private int PendingCount => TotalCount - CompletedCount - FailedCount - RunningCount;
+
+    private double OverallPercentage => TotalCount > 0 
+        ? ((CompletedCount + FailedCount) * 100.0 / TotalCount)
+        : 0;
+
+    private double CompletedPercentage => TotalCount > 0 
+        ? (CompletedCount * 100.0 / TotalCount) 
+        : 0;
+
+    private double FailedPercentage => TotalCount > 0 
+        ? (FailedCount * 100.0 / TotalCount) 
+        : 0;
+
+    private double RunningPercentage => TotalCount > 0 
+        ? (RunningCount * 100.0 / TotalCount) 
+        : 0;
+
+    private string GetOverallStatusClass()
+    {
+        if (!IsProcessing && CompletedCount + FailedCount == TotalCount)
+        {
+            return FailedCount == 0 ? "completed" : "failed";
+        }
+        if (IsProcessing) return "running";
+        return "pending";
+    }
+
+    private string GetOverallStatusText()
+    {
+        if (!IsProcessing && CompletedCount + FailedCount == TotalCount)
+        {
+            return FailedCount == 0 ? "✓ 全部完成" : $"⚠️ 完成 ({FailedCount} 失败)";
+        }
+        if (IsProcessing) return "⏳ 处理中...";
+        return "○ 等待开始";
+    }
+}
+
+<style>
+    .batch-progress-panel {
+        background: #f8f9fa;
+        border-radius: 8px;
+        padding: 1.25rem;
+    }
+
+    .panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+    }
+
+    .panel-header h3 {
+        margin: 0;
+        font-size: 1.1rem;
+    }
+
+    .overall-status {
+        padding: 0.3rem 0.8rem;
+        border-radius: 4px;
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+
+    .overall-status.completed { background: #d4edda; color: #155724; }
+    .overall-status.failed { background: #f8d7da; color: #721c24; }
+    .overall-status.running { background: #cce5ff; color: #004085; }
+    .overall-status.pending { background: #e9ecef; color: #666; }
+
+    .overall-progress {
+        margin-bottom: 1rem;
+    }
+
+    .progress-info {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 0.5rem;
+        font-size: 0.9rem;
+    }
+
+    .progress-track {
+        height: 20px;
+        background: #e9ecef;
+        border-radius: 10px;
+        overflow: hidden;
+        display: flex;
+    }
+
+    .progress-track.small {
+        height: 8px;
+        border-radius: 4px;
+        flex: 1;
+        margin-right: 0.5rem;
+    }
+
+    .progress-fill {
+        height: 100%;
+        transition: width 0.3s;
+    }
+
+    .progress-fill.completed { background: #28a745; }
+    .progress-fill.failed { background: #dc3545; }
+    .progress-fill.running { background: #007bff; }
+
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+    }
+
+    .stat-item {
+        text-align: center;
+        padding: 0.5rem;
+        background: white;
+        border-radius: 6px;
+    }
+
+    .stat-value {
+        display: block;
+        font-size: 1.5rem;
+        font-weight: 600;
+    }
+
+    .stat-label {
+        font-size: 0.75rem;
+        color: #888;
+    }
+
+    .stat-item.completed .stat-value { color: #28a745; }
+    .stat-item.failed .stat-value { color: #dc3545; }
+    .stat-item.pending .stat-value { color: #666; }
+
+    .current-task {
+        background: white;
+        padding: 1rem;
+        border-radius: 6px;
+        margin-bottom: 1rem;
+    }
+
+    .current-task h4 {
+        margin: 0 0 0.5rem 0;
+        font-size: 0.9rem;
+        color: #666;
+    }
+
+    .task-name {
+        font-weight: 500;
+        margin-bottom: 0.5rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .task-progress {
+        display: flex;
+        align-items: center;
+        font-size: 0.9rem;
+    }
+
+    .task-speed {
+        font-size: 0.85rem;
+        color: #666;
+        margin-top: 0.25rem;
+    }
+
+    .failed-tasks {
+        background: #fff5f5;
+        padding: 1rem;
+        border-radius: 6px;
+        border: 1px solid #f8d7da;
+    }
+
+    .failed-tasks h4 {
+        margin: 0 0 0.75rem 0;
+        font-size: 0.9rem;
+        color: #721c24;
+    }
+
+    .failed-item {
+        padding: 0.5rem 0;
+        border-bottom: 1px solid #f8d7da;
+    }
+
+    .failed-item:last-child {
+        border-bottom: none;
+    }
+
+    .failed-name {
+        display: block;
+        font-size: 0.9rem;
+    }
+
+    .failed-reason {
+        display: block;
+        font-size: 0.8rem;
+        color: #856404;
+        margin-top: 0.25rem;
+    }
+
+    .more-failed {
+        text-align: center;
+        font-size: 0.85rem;
+        color: #666;
+        padding-top: 0.5rem;
+    }
+</style>

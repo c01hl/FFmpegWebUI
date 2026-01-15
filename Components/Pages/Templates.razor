@@ -1,0 +1,456 @@
+@page "/templates"
+@using FFmpegWebUI.Models
+@using FFmpegWebUI.Services
+@using FFmpegWebUI.Components.Shared
+@inject ITemplateService TemplateService
+@inject IJSRuntime JS
+@rendermode InteractiveServer
+
+<PageTitle>模板管理 - FFmpeg Web UI</PageTitle>
+
+<div class="templates-container">
+    <div class="page-header">
+        <h1>📋 模板管理</h1>
+        <button class="btn-create" @onclick="CreateTemplate">
+            ➕ 创建模板
+        </button>
+    </div>
+
+    <div class="filter-bar">
+        <input type="text" 
+               placeholder="搜索模板..." 
+               @bind="_searchText"
+               @bind:event="oninput" />
+
+        <div class="category-filter">
+            <button class="filter-btn @(_selectedCategory == null ? "active" : "")"
+                    @onclick="() => FilterByCategory(null)">
+                全部
+            </button>
+            @foreach (var category in _categories)
+            {
+                <button class="filter-btn @(_selectedCategory == category ? "active" : "")"
+                        @onclick="() => FilterByCategory(category)">
+                    @category
+                </button>
+            }
+        </div>
+
+        <div class="type-filter">
+            <label>
+                <input type="checkbox" @bind="_showSystem" /> 显示预设
+            </label>
+            <label>
+                <input type="checkbox" @bind="_showUser" /> 显示自定义
+            </label>
+        </div>
+    </div>
+
+    @if (_isLoading)
+    {
+        <div class="loading">加载中...</div>
+    }
+    else if (_filteredTemplates.Count == 0)
+    {
+        <div class="empty-state">
+            <p>没有找到匹配的模板</p>
+            <button class="btn-create" @onclick="CreateTemplate">创建第一个模板</button>
+        </div>
+    }
+    else
+    {
+        <div class="templates-grid">
+            @foreach (var template in _filteredTemplates)
+            {
+                <TemplateCard Template="template"
+                              OnSelect="SelectTemplate"
+                              OnEdit="EditTemplate"
+                              OnDelete="DeleteTemplate"
+                              OnView="ViewTemplate"
+                              OnCopy="CopyTemplate" />
+            }
+        </div>
+    }
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="message @_messageClass">@_message</div>
+    }
+</div>
+
+<TemplateEditor @ref="_editor" OnSaved="OnTemplateSaved" />
+<TemplateDetailViewer @ref="_detailViewer" OnCopy="CopyTemplate" OnEdit="EditTemplate" />
+
+@if (_showDeleteConfirm)
+{
+    <div class="confirm-dialog">
+        <div class="confirm-overlay" @onclick="CancelDelete"></div>
+        <div class="confirm-panel">
+            <h3>确认删除</h3>
+            <p>确定要删除模板 "@_templateToDelete?.Name" 吗？此操作不可撤销。</p>
+            <div class="confirm-actions">
+                <button class="btn-secondary" @onclick="CancelDelete">取消</button>
+                <button class="btn-danger" @onclick="ConfirmDelete">删除</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<CommandTemplate> _templates = [];
+    private List<string> _categories = [];
+    private string _searchText = string.Empty;
+    private string? _selectedCategory;
+    private bool _showSystem = true;
+    private bool _showUser = true;
+    private bool _isLoading = true;
+    private string _message = string.Empty;
+    private string _messageClass = string.Empty;
+    private TemplateEditor? _editor;
+    private TemplateDetailViewer? _detailViewer;
+    private bool _showDeleteConfirm;
+    private CommandTemplate? _templateToDelete;
+
+    private List<CommandTemplate> _filteredTemplates => _templates
+        .Where(t => _selectedCategory == null || t.Category == _selectedCategory)
+        .Where(t => (_showSystem && t.Type == TemplateType.System) || (_showUser && t.Type == TemplateType.User))
+        .Where(t => string.IsNullOrEmpty(_searchText) ||
+                    t.Name.Contains(_searchText, StringComparison.OrdinalIgnoreCase) ||
+                    t.Description.Contains(_searchText, StringComparison.OrdinalIgnoreCase))
+        .OrderBy(t => t.Type)
+        .ThenBy(t => t.SortOrder)
+        .ToList();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadTemplates();
+    }
+
+    private async Task LoadTemplates()
+    {
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await TemplateService.InitializeSystemTemplatesAsync();
+            _templates = await TemplateService.GetAllTemplatesAsync();
+            _categories = await TemplateService.GetCategoriesAsync();
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private void FilterByCategory(string? category)
+    {
+        _selectedCategory = category;
+    }
+
+    private async Task CreateTemplate()
+    {
+        if (_editor != null)
+        {
+            await _editor.OpenForCreate();
+        }
+    }
+
+    private async Task EditTemplate(CommandTemplate template)
+    {
+        if (_editor != null)
+        {
+            await _editor.OpenForEdit(template);
+        }
+    }
+
+    private void SelectTemplate(CommandTemplate template)
+    {
+        // 导航到转换页面并选择此模板
+        // 这里可以存储选择或直接导航
+        _message = $"已选择模板: {template.Name}";
+        _messageClass = "info";
+    }
+
+    private void ViewTemplate(CommandTemplate template)
+    {
+        _detailViewer?.Open(template);
+    }
+
+    private async Task CopyTemplate(CommandTemplate template)
+    {
+        try
+        {
+            var newTemplate = await TemplateService.CopyTemplateAsync(template.Id);
+            _message = $"✓ 模板已复制为 \"{newTemplate.Name}\"";
+            _messageClass = "success";
+            await LoadTemplates();
+        }
+        catch (Exception ex)
+        {
+            _message = $"复制失败: {ex.Message}";
+            _messageClass = "error";
+        }
+    }
+
+    private void DeleteTemplate(CommandTemplate template)
+    {
+        _templateToDelete = template;
+        _showDeleteConfirm = true;
+    }
+
+    private void CancelDelete()
+    {
+        _showDeleteConfirm = false;
+        _templateToDelete = null;
+    }
+
+    private async Task ConfirmDelete()
+    {
+        if (_templateToDelete == null) return;
+
+        var success = await TemplateService.DeleteTemplateAsync(_templateToDelete.Id);
+        
+        if (success)
+        {
+            _message = $"模板 \"{_templateToDelete.Name}\" 已删除";
+            _messageClass = "success";
+            await LoadTemplates();
+        }
+        else
+        {
+            _message = "删除失败，系统模板不可删除";
+            _messageClass = "error";
+        }
+
+        _showDeleteConfirm = false;
+        _templateToDelete = null;
+    }
+
+    private async Task OnTemplateSaved()
+    {
+        _message = "模板已保存";
+        _messageClass = "success";
+        await LoadTemplates();
+    }
+}
+
+<style>
+    .templates-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    .page-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.5rem;
+    }
+
+    .page-header h1 {
+        margin: 0;
+    }
+
+    .btn-create {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem 1.5rem;
+        background: #28a745;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        font-size: 0.95rem;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+
+    .btn-create:hover {
+        background: #218838;
+    }
+
+    .filter-bar {
+        background: var(--light-bg, #f8f9fa);
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1.5rem;
+        border: 1px solid var(--border-color, #ddd);
+    }
+
+    .filter-bar input[type="text"] {
+        width: 100%;
+        padding: 0.6rem;
+        border: 1px solid var(--border-color, #ddd);
+        border-radius: 4px;
+        margin-bottom: 0.75rem;
+        font-size: 0.95rem;
+        background: var(--input-bg, white);
+        color: var(--text-primary, #333);
+    }
+
+    .category-filter {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.75rem;
+    }
+
+    .filter-btn {
+        padding: 0.4rem 0.8rem;
+        border: 1px solid var(--border-color, #ddd);
+        border-radius: 4px;
+        background: var(--card-bg, white);
+        color: var(--text-primary, #333);
+        cursor: pointer;
+        font-size: 0.85rem;
+        transition: background 0.2s, color 0.2s;
+    }
+
+    .filter-btn:hover {
+        background: var(--light-bg, #e9ecef);
+    }
+
+    .filter-btn.active {
+        background: #007bff;
+        color: white;
+        border-color: #007bff;
+    }
+
+    .type-filter {
+        display: flex;
+        gap: 1rem;
+    }
+
+    .type-filter label {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        cursor: pointer;
+        font-size: 0.9rem;
+    }
+
+    .loading,
+    .empty-state {
+        text-align: center;
+        padding: 3rem;
+        color: #666;
+    }
+
+    .templates-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 1rem;
+    }
+
+    .message {
+        position: fixed;
+        bottom: 2rem;
+        right: 2rem;
+        padding: 1rem 1.5rem;
+        border-radius: 8px;
+        z-index: 100;
+        animation: slideIn 0.3s;
+    }
+
+    .message.success {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .message.error {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .message.info {
+        background: #cce5ff;
+        color: #004085;
+    }
+
+    @@keyframes slideIn {
+        from {
+            transform: translateX(100%);
+            opacity: 0;
+        }
+        to {
+            transform: translateX(0);
+            opacity: 1;
+        }
+    }
+
+    .confirm-dialog {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 1001;
+    }
+
+    .confirm-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+    }
+
+    .confirm-panel {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: var(--card-bg, white);
+        padding: 1.5rem;
+        border-radius: 8px;
+        min-width: 300px;
+        color: var(--text-primary, #333);
+        border: 1px solid var(--border-color, #ddd);
+    }
+
+    .confirm-panel h3 {
+        margin: 0 0 1rem 0;
+        color: var(--text-primary, #333);
+    }
+
+    .confirm-panel p {
+        margin: 0 0 1.5rem 0;
+        color: var(--text-secondary, #666);
+    }
+
+    .confirm-actions {
+        display: flex;
+        gap: 0.75rem;
+        justify-content: flex-end;
+    }
+
+    .btn-secondary,
+    .btn-danger {
+        padding: 0.5rem 1rem;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+    }
+
+    .btn-secondary {
+        background: var(--light-bg, #f8f9fa);
+        border: 1px solid var(--border-color, #ddd);
+        color: var(--text-primary, #333);
+    }
+
+    .btn-secondary:hover {
+        background: var(--card-bg, #e9ecef);
+    }
+
+    .btn-danger {
+        background: #dc3545;
+        color: white;
+        border: none;
+    }
+
+    .btn-danger:hover {
+        background: #c82333;
+    }
+</style>

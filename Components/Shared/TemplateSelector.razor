@@ -1,0 +1,290 @@
+@using FFmpegWebUI.Models
+@using FFmpegWebUI.Services
+@inject ITemplateService TemplateService
+@inject IHardwareDetectionService HardwareDetectionService
+
+<div class="template-selector">
+    <label class="selector-label">选择转换模板</label>
+    
+    <div class="search-box">
+        <input type="text" 
+               placeholder="搜索模板..." 
+               @bind="_searchText"
+               @bind:event="oninput" />
+    </div>
+
+    <div class="category-tabs">
+        <button class="tab @(_selectedCategory == null ? "active" : "")" 
+                @onclick="() => SelectCategory(null)">
+            全部
+        </button>
+        @foreach (var category in _categories)
+        {
+            <button class="tab @(_selectedCategory == category ? "active" : "")"
+                    @onclick="() => SelectCategory(category)">
+                @category
+            </button>
+        }
+    </div>
+
+    <div class="templates-list">
+        @if (_filteredTemplates.Count == 0)
+        {
+            <div class="no-templates">没有找到匹配的模板</div>
+        }
+        else
+        {
+            @foreach (var template in _filteredTemplates)
+            {
+                var isSelected = SelectedTemplate?.Id == template.Id;
+                var isDisabled = template.RequiresHardwareAcceleration && 
+                                !string.IsNullOrEmpty(template.RequiredEncoder) &&
+                                !_availableEncoders.Contains(template.RequiredEncoder);
+
+                <div class="template-item @(isSelected ? "selected" : "") @(isDisabled ? "disabled" : "")"
+                     @onclick="() => SelectTemplate(template, isDisabled)">
+                    <div class="template-header">
+                        <span class="template-name">@template.Name</span>
+                        @if (template.Type == TemplateType.System)
+                        {
+                            <span class="badge system">预设</span>
+                        }
+                        else
+                        {
+                            <span class="badge user">自定义</span>
+                        }
+                        @if (template.RequiresHardwareAcceleration)
+                        {
+                            <span class="badge hw @(isDisabled ? "unavailable" : "")">
+                                @(isDisabled ? "⚠️ 硬件加速" : "🚀 硬件加速")
+                            </span>
+                        }
+                    </div>
+                    <p class="template-desc">@template.Description</p>
+                    <div class="template-meta">
+                        <span class="meta-item">📁 输出: .@template.OutputExtension</span>
+                        @if (template.SupportedInputFormats.Count > 0)
+                        {
+                            <span class="meta-item">📥 输入: @string.Join(", ", template.SupportedInputFormats.Take(3))@(template.SupportedInputFormats.Count > 3 ? "..." : "")</span>
+                        }
+                    </div>
+                    @if (isDisabled)
+                    {
+                        <div class="disabled-reason">需要 @template.RequiredEncoder 编码器，当前不可用</div>
+                    }
+                </div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public CommandTemplate? SelectedTemplate { get; set; }
+
+    [Parameter]
+    public EventCallback<CommandTemplate> SelectedTemplateChanged { get; set; }
+
+    private List<CommandTemplate> _templates = [];
+    private List<string> _categories = [];
+    private HashSet<string> _availableEncoders = [];
+    private string? _selectedCategory;
+    private string _searchText = string.Empty;
+
+    private List<CommandTemplate> _filteredTemplates => _templates
+        .Where(t => _selectedCategory == null || t.Category == _selectedCategory)
+        .Where(t => string.IsNullOrEmpty(_searchText) || 
+                    t.Name.Contains(_searchText, StringComparison.OrdinalIgnoreCase) ||
+                    t.Description.Contains(_searchText, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadTemplates();
+        await LoadAvailableEncoders();
+    }
+
+    private async Task LoadTemplates()
+    {
+        await TemplateService.InitializeSystemTemplatesAsync();
+        _templates = await TemplateService.GetAllTemplatesAsync();
+        _categories = await TemplateService.GetCategoriesAsync();
+    }
+
+    private async Task LoadAvailableEncoders()
+    {
+        var encoders = await HardwareDetectionService.DetectEncodersAsync();
+        _availableEncoders = encoders.Where(e => e.IsAvailable).Select(e => e.Name).ToHashSet();
+    }
+
+    private void SelectCategory(string? category)
+    {
+        _selectedCategory = category;
+    }
+
+    private async Task SelectTemplate(CommandTemplate template, bool isDisabled)
+    {
+        if (isDisabled) return;
+        
+        SelectedTemplate = template;
+        await SelectedTemplateChanged.InvokeAsync(template);
+    }
+}
+
+<style>
+    .template-selector {
+        border: 1px solid var(--border-color, #ddd);
+        border-radius: 8px;
+        background: var(--card-bg, white);
+        overflow: hidden;
+    }
+
+    .selector-label {
+        display: block;
+        padding: 1rem;
+        font-weight: 600;
+        background: var(--light-bg, #f8f9fa);
+        border-bottom: 1px solid var(--border-color, #ddd);
+        color: var(--text-primary, #333);
+    }
+
+    .search-box {
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid var(--border-color, #eee);
+    }
+
+    .search-box input {
+        width: 100%;
+        padding: 0.5rem;
+        border: 1px solid var(--border-color, #ddd);
+        border-radius: 4px;
+        font-size: 0.9rem;
+        background: var(--input-bg, white);
+        color: var(--text-primary, #333);
+    }
+
+    .category-tabs {
+        display: flex;
+        gap: 0.25rem;
+        padding: 0.5rem 1rem;
+        background: var(--light-bg, #f8f9fa);
+        border-bottom: 1px solid var(--border-color, #ddd);
+        overflow-x: auto;
+    }
+
+    .tab {
+        padding: 0.4rem 0.8rem;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        cursor: pointer;
+        font-size: 0.85rem;
+        white-space: nowrap;
+        color: var(--text-secondary, #666);
+        transition: background 0.2s, color 0.2s;
+    }
+
+    .tab:hover {
+        background: var(--card-bg, #e9ecef);
+        color: var(--text-primary, #333);
+    }
+
+    .tab.active {
+        background: #007bff;
+        color: white;
+    }
+
+    .templates-list {
+        max-height: 400px;
+        overflow-y: auto;
+    }
+
+    .no-templates {
+        padding: 2rem;
+        text-align: center;
+        color: var(--text-secondary, #666);
+    }
+
+    .template-item {
+        padding: 1rem;
+        border-bottom: 1px solid var(--border-color, #eee);
+        cursor: pointer;
+        transition: background 0.2s;
+        color: var(--text-primary, #333);
+    }
+
+    .template-item:hover:not(.disabled) {
+        background: var(--light-bg, #f8f9fa);
+    }
+
+    .template-item.selected {
+        background: #e7f1ff;
+        border-left: 3px solid #007bff;
+    }
+
+    .template-item.disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+    }
+
+    .template-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .template-name {
+        font-weight: 500;
+        color: var(--text-primary, #333);
+    }
+
+    .badge {
+        padding: 0.15rem 0.5rem;
+        border-radius: 3px;
+        font-size: 0.75rem;
+    }
+
+    .badge.system {
+        background: #e9ecef;
+        color: #495057;
+    }
+
+    .badge.user {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .badge.hw {
+        background: #cce5ff;
+        color: #004085;
+    }
+
+    .badge.hw.unavailable {
+        background: #fff3cd;
+        color: #856404;
+    }
+
+    .template-desc {
+        margin: 0;
+        font-size: 0.9rem;
+        color: var(--text-secondary, #666);
+    }
+
+    .template-meta {
+        display: flex;
+        gap: 1rem;
+        margin-top: 0.5rem;
+        font-size: 0.8rem;
+        color: var(--text-muted, #888);
+    }
+
+    .disabled-reason {
+        margin-top: 0.5rem;
+        padding: 0.25rem 0.5rem;
+        background: #fff3cd;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        color: #856404;
+    }
+</style>

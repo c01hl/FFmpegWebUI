@@ -1,0 +1,220 @@
+@using FFmpegWebUI.Models
+
+<div class="template-card @(IsSelected ? "selected" : "")">
+    <div class="card-header">
+        <span class="card-name">@Template.Name</span>
+        <div class="card-badges">
+            @if (Template.Type == TemplateType.System)
+            {
+                <span class="badge system">预设</span>
+            }
+            else
+            {
+                <span class="badge user">自定义</span>
+            }
+            @if (Template.RequiresHardwareAcceleration)
+            {
+                <span class="badge hw">🚀</span>
+            }
+        </div>
+    </div>
+
+    <p class="card-desc">@Template.Description</p>
+
+    <div class="card-meta">
+        <span>📁 .@Template.OutputExtension</span>
+        <span>📂 @Template.Category</span>
+    </div>
+
+    <div class="card-actions">
+        <button class="btn-icon" title="查看详情" @onclick="OnViewClick">
+            🔍
+        </button>
+        @if (Template.Type == TemplateType.System)
+        {
+            <button class="btn-icon copy" title="复制模板" @onclick="OnCopyClick">
+                📋
+            </button>
+        }
+        else
+        {
+            <button class="btn-icon" title="编辑" @onclick="OnEditClick">
+                ✏️
+            </button>
+            <button class="btn-icon delete" title="删除" @onclick="OnDeleteClick">
+                🗑️
+            </button>
+        }
+        <button class="btn-use" @onclick="OnSelectClick">
+            选择
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public CommandTemplate Template { get; set; } = default!;
+
+    [Parameter]
+    public bool IsSelected { get; set; }
+
+    [Parameter]
+    public EventCallback<CommandTemplate> OnSelect { get; set; }
+
+    [Parameter]
+    public EventCallback<CommandTemplate> OnEdit { get; set; }
+
+    [Parameter]
+    public EventCallback<CommandTemplate> OnDelete { get; set; }
+
+    [Parameter]
+    public EventCallback<CommandTemplate> OnView { get; set; }
+
+    [Parameter]
+    public EventCallback<CommandTemplate> OnCopy { get; set; }
+
+    private async Task OnSelectClick()
+    {
+        await OnSelect.InvokeAsync(Template);
+    }
+
+    private async Task OnEditClick()
+    {
+        await OnEdit.InvokeAsync(Template);
+    }
+
+    private async Task OnDeleteClick()
+    {
+        await OnDelete.InvokeAsync(Template);
+    }
+
+    private async Task OnViewClick()
+    {
+        await OnView.InvokeAsync(Template);
+    }
+
+    private async Task OnCopyClick()
+    {
+        await OnCopy.InvokeAsync(Template);
+    }
+}
+
+<style>
+    .template-card {
+        background: var(--card-bg, white);
+        border: 1px solid var(--border-color, #ddd);
+        border-radius: 8px;
+        padding: 1rem;
+        transition: box-shadow 0.2s, border-color 0.2s;
+        color: var(--text-primary, #333);
+    }
+
+    .template-card:hover {
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    }
+
+    .template-card.selected {
+        border-color: #007bff;
+        box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.2);
+    }
+
+    .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .card-name {
+        font-weight: 600;
+        font-size: 1rem;
+        color: var(--text-primary, #333);
+    }
+
+    .card-badges {
+        display: flex;
+        gap: 0.25rem;
+    }
+
+    .badge {
+        padding: 0.1rem 0.4rem;
+        border-radius: 3px;
+        font-size: 0.7rem;
+    }
+
+    .badge.system {
+        background: #e9ecef;
+        color: #495057;
+    }
+
+    .badge.user {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .badge.hw {
+        background: #cce5ff;
+        color: #004085;
+    }
+
+    .card-desc {
+        margin: 0 0 0.75rem 0;
+        font-size: 0.85rem;
+        color: var(--text-secondary, #666);
+        line-height: 1.4;
+    }
+
+    .card-meta {
+        display: flex;
+        gap: 1rem;
+        font-size: 0.8rem;
+        color: var(--text-muted, #888);
+        margin-bottom: 0.75rem;
+    }
+
+    .card-actions {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: flex-end;
+        align-items: center;
+    }
+
+    .btn-icon {
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0.25rem;
+        font-size: 1rem;
+        opacity: 0.6;
+        transition: opacity 0.2s;
+    }
+
+    .btn-icon:hover {
+        opacity: 1;
+    }
+
+    .btn-icon.delete:hover {
+        opacity: 1;
+        color: #dc3545;
+    }
+
+    .btn-icon.copy:hover {
+        opacity: 1;
+        color: #28a745;
+    }
+
+    .btn-use {
+        padding: 0.4rem 0.8rem;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        font-size: 0.85rem;
+        cursor: pointer;
+    }
+
+    .btn-use:hover {
+        background: #0056b3;
+    }
+</style>

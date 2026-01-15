@@ -1,0 +1,373 @@
+﻿@page "/"
+@using FFmpegWebUI.Models
+@using FFmpegWebUI.Services
+@using FFmpegWebUI.Components.Shared
+@inject IFFmpegService FFmpegService
+@inject IHardwareDetectionService HardwareDetectionService
+@rendermode InteractiveServer
+
+<PageTitle>首页 - FFmpeg Web UI</PageTitle>
+
+<div class="home-container">
+    <h1>🎬 FFmpeg Web UI</h1>
+    <p class="subtitle">本地媒体文件转换工具</p>
+
+    <section class="status-section">
+        <h2>📊 系统状态</h2>
+        
+        @if (_isLoading)
+        {
+            <div class="loading">
+                <span class="spinner"></span> 正在检测系统环境...
+            </div>
+        }
+        else
+        {
+            <div class="ffmpeg-status">
+                <h3>FFmpeg 状态</h3>
+                @if (_ffmpegInfo != null)
+                {
+                    <div class="status-card success">
+                        <div class="status-icon">✓</div>
+                        <div class="status-content">
+                            <strong>FFmpeg 已安装</strong>
+                            <p>版本: @_ffmpegInfo.Version</p>
+                            <p>路径: @_ffmpegInfo.Path</p>
+                            <p>支持格式: @_ffmpegInfo.SupportedFormats.Count 种</p>
+                            <p>支持编解码器: @_ffmpegInfo.SupportedCodecs.Count 种</p>
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <div class="status-card error">
+                        <div class="status-icon">✗</div>
+                        <div class="status-content">
+                            <strong>FFmpeg 未找到</strong>
+                            <p>请确保 FFmpeg 已安装并添加到系统 PATH，或在设置中指定路径。</p>
+                            <a href="https://ffmpeg.org/download.html" target="_blank">下载 FFmpeg</a>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    </section>
+
+    <section class="encoders-section">
+        <div class="section-header">
+            <h2>🖥️ 硬件编码器</h2>
+            <button class="refresh-btn" @onclick="RefreshEncoders" disabled="@_isRefreshing">
+                @if (_isRefreshing)
+                {
+                    <span class="spinner-small"></span>
+                }
+                else
+                {
+                    <span>🔄</span>
+                }
+                刷新检测
+            </button>
+        </div>
+
+        @if (_lastDetectionTime.HasValue)
+        {
+            <p class="last-detection">上次检测: @_lastDetectionTime.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</p>
+        }
+
+        @if (_encoders.Count > 0)
+        {
+            <div class="encoders-summary">
+                <span class="summary-item available">✓ @_encoders.Count(e => e.IsAvailable) 个可用</span>
+                <span class="summary-item unavailable">✗ @_encoders.Count(e => !e.IsAvailable) 个不可用</span>
+            </div>
+
+            <h3>硬件加速编码器</h3>
+            <div class="encoders-grid">
+                @foreach (var encoder in _encoders.Where(e => e.Type != EncoderType.Software))
+                {
+                    <EncoderCard Encoder="encoder" />
+                }
+            </div>
+
+            <h3>软件编码器</h3>
+            <div class="encoders-grid">
+                @foreach (var encoder in _encoders.Where(e => e.Type == EncoderType.Software))
+                {
+                    <EncoderCard Encoder="encoder" />
+                }
+            </div>
+        }
+        else if (!_isLoading)
+        {
+            <p class="no-encoders">未检测到编码器，请确保 FFmpeg 已正确安装。</p>
+        }
+    </section>
+
+    <section class="quick-start">
+        <h2>🚀 快速开始</h2>
+        <div class="quick-links">
+            <a href="/convert" class="quick-link">
+                <span class="quick-icon">🔄</span>
+                <span class="quick-text">开始转换</span>
+            </a>
+            <a href="/templates" class="quick-link">
+                <span class="quick-icon">📋</span>
+                <span class="quick-text">管理模板</span>
+            </a>
+            <a href="/batch" class="quick-link">
+                <span class="quick-icon">📁</span>
+                <span class="quick-text">批量处理</span>
+            </a>
+        </div>
+    </section>
+</div>
+
+@code {
+    private FFmpegInfo? _ffmpegInfo;
+    private List<HardwareEncoder> _encoders = [];
+    private bool _isLoading = true;
+    private bool _isRefreshing;
+    private DateTime? _lastDetectionTime;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadSystemStatus();
+    }
+
+    private async Task LoadSystemStatus()
+    {
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            _ffmpegInfo = await FFmpegService.GetFFmpegInfoAsync();
+
+            if (_ffmpegInfo != null)
+            {
+                _encoders = await HardwareDetectionService.DetectEncodersAsync();
+                _lastDetectionTime = HardwareDetectionService.LastDetectionTime;
+            }
+        }
+        finally
+        {
+            _isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task RefreshEncoders()
+    {
+        _isRefreshing = true;
+        StateHasChanged();
+
+        try
+        {
+            _encoders = await HardwareDetectionService.DetectEncodersAsync(forceRefresh: true);
+            _lastDetectionTime = HardwareDetectionService.LastDetectionTime;
+        }
+        finally
+        {
+            _isRefreshing = false;
+            StateHasChanged();
+        }
+    }
+}
+
+<style>
+    .home-container {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+
+    h1 {
+        color: #333;
+        margin-bottom: 0.25rem;
+    }
+
+    .subtitle {
+        color: #666;
+        font-size: 1.1rem;
+        margin-bottom: 2rem;
+    }
+
+    section {
+        margin-bottom: 2rem;
+        padding: 1.5rem;
+        background: #f8f9fa;
+        border-radius: 8px;
+    }
+
+    h2 {
+        margin-top: 0;
+        margin-bottom: 1rem;
+        color: #333;
+    }
+
+    h3 {
+        margin-top: 1.5rem;
+        margin-bottom: 1rem;
+        color: #555;
+        font-size: 1rem;
+    }
+
+    .loading {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: #666;
+    }
+
+    .spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid #ddd;
+        border-top-color: #007bff;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+
+    .spinner-small {
+        width: 14px;
+        height: 14px;
+        border: 2px solid #ddd;
+        border-top-color: #007bff;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        display: inline-block;
+    }
+
+    @@keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .status-card {
+        display: flex;
+        gap: 1rem;
+        padding: 1rem;
+        border-radius: 8px;
+        background: white;
+    }
+
+    .status-card.success {
+        border-left: 4px solid #28a745;
+    }
+
+    .status-card.error {
+        border-left: 4px solid #dc3545;
+    }
+
+    .status-icon {
+        font-size: 2rem;
+    }
+
+    .status-content p {
+        margin: 0.25rem 0;
+        color: #666;
+        font-size: 0.9rem;
+    }
+
+    .section-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+    }
+
+    .section-header h2 {
+        margin: 0;
+    }
+
+    .refresh-btn {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        background: white;
+        cursor: pointer;
+        font-size: 0.9rem;
+    }
+
+    .refresh-btn:hover:not(:disabled) {
+        background: #f0f0f0;
+    }
+
+    .refresh-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+    }
+
+    .last-detection {
+        font-size: 0.85rem;
+        color: #888;
+        margin-bottom: 1rem;
+    }
+
+    .encoders-summary {
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+
+    .summary-item {
+        padding: 0.25rem 0.75rem;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+
+    .summary-item.available {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .summary-item.unavailable {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .encoders-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    .no-encoders {
+        color: #666;
+        font-style: italic;
+    }
+
+    .quick-links {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+
+    .quick-link {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 1.5rem 2rem;
+        background: white;
+        border-radius: 8px;
+        text-decoration: none;
+        color: #333;
+        transition: transform 0.2s, box-shadow 0.2s;
+        min-width: 120px;
+    }
+
+    .quick-link:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+
+    .quick-icon {
+        font-size: 2rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .quick-text {
+        font-weight: 500;
+    }
+</style>

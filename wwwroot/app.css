@@ -1,0 +1,454 @@
+/* FFmpeg Web UI - 全局样式 */
+
+:root {
+    --primary-color: #007bff;
+    --primary-dark: #0056b3;
+    --success-color: #28a745;
+    --danger-color: #dc3545;
+    --warning-color: #ffc107;
+    --info-color: #17a2b8;
+    --light-bg: #f8f9fa;
+    --border-color: #ddd;
+    --text-primary: #333;
+    --text-secondary: #666;
+    --text-muted: #888;
+    --body-bg: #ffffff;
+    --page-bg: #ffffff;
+    --sidebar-bg: #f8f9fa;
+    --main-bg: #ffffff;
+    --input-bg: #ffffff;
+    --card-bg: #ffffff;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.1);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+}
+
+/* 浅色主题 */
+[data-theme="Light"] {
+    --light-bg: #f8f9fa;
+    --border-color: #ddd;
+    --text-primary: #333;
+    --text-secondary: #666;
+    --text-muted: #888;
+    --body-bg: #ffffff;
+    --page-bg: #ffffff;
+    --sidebar-bg: #f8f9fa;
+    --main-bg: #ffffff;
+    --input-bg: #ffffff;
+    --card-bg: #ffffff;
+}
+
+/* 深色主题 */
+[data-theme="Dark"] {
+    --light-bg: #2d2d2d;
+    --border-color: #444;
+    --text-primary: #e0e0e0;
+    --text-secondary: #aaa;
+    --text-muted: #888;
+    --body-bg: #121212;
+    --page-bg: #121212;
+    --sidebar-bg: #1e1e1e;
+    --main-bg: #181818;
+    --input-bg: #2d2d2d;
+    --card-bg: #252525;
+}
+
+/* 跟随系统 - 深色模式 */
+@media (prefers-color-scheme: dark) {
+    [data-theme="System"] {
+        --light-bg: #2d2d2d;
+        --border-color: #444;
+        --text-primary: #e0e0e0;
+        --text-secondary: #aaa;
+        --text-muted: #888;
+        --body-bg: #121212;
+        --page-bg: #121212;
+        --sidebar-bg: #1e1e1e;
+        --main-bg: #181818;
+        --input-bg: #2d2d2d;
+        --card-bg: #252525;
+    }
+}
+
+/* 应用主题变量到元素 */
+body {
+    background: var(--body-bg);
+    color: var(--text-primary);
+}
+
+.page {
+    background: var(--page-bg);
+}
+
+.sidebar {
+    background: var(--sidebar-bg);
+}
+
+main {
+    background: var(--main-bg);
+}
+
+/* 深色模式下的输入框和卡片 */
+[data-theme="Dark"] input,
+[data-theme="Dark"] select,
+[data-theme="Dark"] textarea {
+    background: var(--input-bg);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+[data-theme="Dark"] .settings-section,
+[data-theme="Dark"] .form-section,
+[data-theme="Dark"] .template-section,
+[data-theme="Dark"] .history-section,
+[data-theme="Dark"] .batch-file-list,
+[data-theme="Dark"] .card {
+    background: var(--card-bg);
+    border-color: var(--border-color);
+}
+
+[data-theme="Dark"] .list-header,
+[data-theme="Dark"] .list-footer {
+    background: var(--sidebar-bg);
+    border-color: var(--border-color);
+}
+
+[data-theme="Dark"] .file-item:hover {
+    background: var(--sidebar-bg);
+}
+
+/* 深色主题 - 按钮和过滤器 */
+[data-theme="Dark"] .filter-btn,
+[data-theme="Dark"] .filter-bar,
+[data-theme="Dark"] .tab,
+[data-theme="Dark"] .category-tabs {
+    background: var(--card-bg);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+[data-theme="Dark"] .filter-btn:hover,
+[data-theme="Dark"] .tab:hover {
+    background: var(--sidebar-bg);
+}
+
+[data-theme="Dark"] .filter-btn.active,
+[data-theme="Dark"] .tab.active {
+    background: #007bff;
+    color: white;
+    border-color: #007bff;
+}
+
+/* 深色主题 - 模板卡片和选择器 */
+[data-theme="Dark"] .template-card,
+[data-theme="Dark"] .template-selector,
+[data-theme="Dark"] .template-item {
+    background: var(--card-bg);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+[data-theme="Dark"] .template-item:hover:not(.disabled) {
+    background: var(--sidebar-bg);
+}
+
+[data-theme="Dark"] .template-item.selected {
+    background: #1a3a5c;
+}
+
+[data-theme="Dark"] .selector-label {
+    background: var(--sidebar-bg);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+[data-theme="Dark"] .card-desc,
+[data-theme="Dark"] .template-desc {
+    color: var(--text-secondary);
+}
+
+[data-theme="Dark"] .card-meta,
+[data-theme="Dark"] .template-meta {
+    color: var(--text-muted);
+}
+
+/* 深色主题 - 确认对话框 */
+[data-theme="Dark"] .confirm-panel {
+    background: var(--card-bg);
+    color: var(--text-primary);
+}
+
+[data-theme="Dark"] .confirm-panel p {
+    color: var(--text-secondary);
+}
+
+/* 深色主题 - 次要按钮 */
+[data-theme="Dark"] .btn-secondary {
+    background: var(--sidebar-bg);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+[data-theme="Dark"] .btn-secondary:hover {
+    background: var(--card-bg);
+}
+
+@media (prefers-color-scheme: dark) {
+    [data-theme="System"] input,
+    [data-theme="System"] select,
+    [data-theme="System"] textarea {
+        background: var(--input-bg);
+        color: var(--text-primary);
+        border-color: var(--border-color);
+    }
+
+    [data-theme="System"] .settings-section,
+    [data-theme="System"] .form-section,
+    [data-theme="System"] .template-section,
+    [data-theme="System"] .history-section,
+    [data-theme="System"] .batch-file-list,
+    [data-theme="System"] .card {
+        background: var(--card-bg);
+        border-color: var(--border-color);
+    }
+
+    [data-theme="System"] .list-header,
+    [data-theme="System"] .list-footer {
+        background: var(--sidebar-bg);
+        border-color: var(--border-color);
+    }
+
+    [data-theme="System"] .file-item:hover {
+        background: var(--sidebar-bg);
+    }
+
+    /* 跟随系统 - 按钮和过滤器 */
+    [data-theme="System"] .filter-btn,
+    [data-theme="System"] .filter-bar,
+    [data-theme="System"] .tab,
+    [data-theme="System"] .category-tabs {
+        background: var(--card-bg);
+        color: var(--text-primary);
+        border-color: var(--border-color);
+    }
+
+    [data-theme="System"] .filter-btn:hover,
+    [data-theme="System"] .tab:hover {
+        background: var(--sidebar-bg);
+    }
+
+    [data-theme="System"] .filter-btn.active,
+    [data-theme="System"] .tab.active {
+        background: #007bff;
+        color: white;
+        border-color: #007bff;
+    }
+
+    /* 跟随系统 - 模板卡片和选择器 */
+    [data-theme="System"] .template-card,
+    [data-theme="System"] .template-selector,
+    [data-theme="System"] .template-item {
+        background: var(--card-bg);
+        border-color: var(--border-color);
+        color: var(--text-primary);
+    }
+
+    [data-theme="System"] .template-item:hover:not(.disabled) {
+        background: var(--sidebar-bg);
+    }
+
+    [data-theme="System"] .template-item.selected {
+        background: #1a3a5c;
+    }
+
+    [data-theme="System"] .selector-label {
+        background: var(--sidebar-bg);
+        border-color: var(--border-color);
+        color: var(--text-primary);
+    }
+
+    [data-theme="System"] .card-desc,
+    [data-theme="System"] .template-desc {
+        color: var(--text-secondary);
+    }
+
+    [data-theme="System"] .card-meta,
+    [data-theme="System"] .template-meta {
+        color: var(--text-muted);
+    }
+
+    /* 跟随系统 - 确认对话框 */
+    [data-theme="System"] .confirm-panel {
+        background: var(--card-bg);
+        color: var(--text-primary);
+    }
+
+    [data-theme="System"] .confirm-panel p {
+        color: var(--text-secondary);
+    }
+
+    /* 跟随系统 - 次要按钮 */
+    [data-theme="System"] .btn-secondary {
+        background: var(--sidebar-bg);
+        color: var(--text-primary);
+        border-color: var(--border-color);
+    }
+
+    [data-theme="System"] .btn-secondary:hover {
+        background: var(--card-bg);
+    }
+}
+
+html, body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    line-height: 1.6;
+}
+
+a, .btn-link {
+    color: var(--primary-color);
+}
+
+a:hover {
+    color: var(--primary-dark);
+}
+
+/* 按钮样式 */
+.btn-primary {
+    color: #fff;
+    background-color: var(--primary-color);
+    border-color: var(--primary-color);
+    transition: all 0.2s;
+}
+
+.btn-primary:hover {
+    background-color: var(--primary-dark);
+    border-color: var(--primary-dark);
+}
+
+.btn:focus, .btn:active:focus, .btn-link.nav-link:focus, .form-control:focus, .form-check-input:focus {
+    box-shadow: 0 0 0 0.15rem rgba(0, 123, 255, 0.25);
+}
+
+/* 内容区域 */
+.content {
+    padding-top: 1.5rem;
+    padding-bottom: 2rem;
+}
+
+h1 {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+h1:focus {
+    outline: none;
+}
+
+h2, h3, h4 {
+    color: var(--text-primary);
+}
+
+/* 表单样式增强 */
+.valid.modified:not([type=checkbox]) {
+    outline: 1px solid var(--success-color);
+}
+
+.invalid {
+    outline: 1px solid var(--danger-color);
+}
+
+.validation-message {
+    color: var(--danger-color);
+}
+
+/* 卡片通用样式 */
+.card {
+    background: white;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+    .page {
+        flex-direction: column;
+    }
+
+    .sidebar {
+        width: 100%;
+        height: auto;
+    }
+
+    .content {
+        padding: 1rem;
+    }
+}
+
+/* 错误边界 */
+.blazor-error-boundary {
+    background: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTYiIGhlaWdodD0iNDkiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgeG1sbnM6eGxpbms9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkveGxpbmsiIG92ZXJmbG93PSJoaWRkZW4iPjxkZWZzPjxjbGlwUGF0aCBpZD0iY2xpcDAiPjxyZWN0IHg9IjIzNSIgeT0iNTEiIHdpZHRoPSI1NiIgaGVpZ2h0PSI0OSIvPjwvY2xpcFBhdGg+PC9kZWZzPjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMCkiIHRyYW5zZm9ybT0idHJhbnNsYXRlKC0yMzUgLTUxKSI+PHBhdGggZD0iTTI2My41MDYgNTFDMjY0LjcxNyA1MSAyNjUuODEzIDUxLjQ4MzcgMjY2LjYwNiA1Mi4yNjU4TDI2Ny4wNTIgNTIuNzk4NyAyNjcuNTM5IDUzLjYyODMgMjkwLjE4NSA5Mi4xODMxIDI5MC41NDUgOTIuNzk1IDI5MC42NTYgOTIuOTk2QzI5MC44NzcgOTMuNTEzIDI5MSA5NC4wODE1IDI5MSA5NC42NzgyIDI5MSA5Ny4wNjUxIDI4OS4wMzggOTkgMjg2LjYxNyA5OUwyNDAuMzgzIDk5QzIzNy45NjMgOTkgMjM2IDk3LjA2NTEgMjM2IDk0LjY3ODIgMjM2IDk0LjM3OTkgMjM2LjAzMSA5NC4wODg2IDIzNi4wODkgOTMuODA3MkwyMzYuMzM4IDkzLjAxNjIgMjM2Ljg1OCA5Mi4xMzE0IDI1OS40NzMgNTMuNjI5NCAyNTkuOTYxIDUyLjc5ODUgMjYwLjQwNyA1Mi4yNjU4QzI2MS4yIDUxLjQ4MzcgMjYyLjI5NiA1MSAyNjMuNTA2IDUxWk0yNjMuNTg2IDY2LjAxODNDMjYwLjczNyA2Ni4wMTgzIDI1OS4zMTMgNjcuMTI0NSAyNTkuMzEzIDY5LjMzNyAyNTkuMzEzIDY5LjYxMDIgMjU5LjMzMiA2OS44NjA4IDI1OS4zNzEgNzAuMDg4N0wyNjEuNzk1IDg0LjAxNjEgMjY1LjM4IDg0LjAxNjEgMjY3LjgyMSA2OS43NDc1QzI2Ny44NiA2OS43MzA5IDI2Ny44NzkgNjkuNTg3NyAyNjcuODc5IDY5LjMxNzkgMjY3Ljg3OSA2Ny4xMTgyIDI2Ni40NDggNjYuMDE4MyAyNjMuNTg2IDY2LjAxODNaTTI2My41NzYgODYuMDU0N0MyNjEuMDQ5IDg2LjA1NDcgMjU5Ljc4NiA4Ny4zMDA1IDI1OS43ODYgODkuNzkyMSAyNTkuNzg2IDkyLjI4MzcgMjYxLjA0OSA5My41Mjk1IDI2My41NzYgOTMuNTI5NSAyNjYuMTE2IDkzLjUyOTUgMjY3LjM4NyA5Mi4yODM3IDI2Ny4zODcgODkuNzkyMSAyNjcuMzg3IDg3LjMwMDUgMjY2LjExNiA4Ni4wNTQ3IDI2My41NzYgODYuMDU0N1oiIGZpbGw9IiNGRkU1MDAiIGZpbGwtcnVsZT0iZXZlbm9kZCIvPjwvZz48L3N2Zz4=) no-repeat 1rem/1.8rem, #b32121;
+    padding: 1rem 1rem 1rem 3.7rem;
+    color: white;
+    border-radius: var(--radius-md);
+}
+
+.blazor-error-boundary::after {
+    content: "发生了一个错误"
+}
+
+.darker-border-checkbox.form-check-input {
+    border-color: #929292;
+}
+
+.form-floating > .form-control-plaintext::placeholder, .form-floating > .form-control::placeholder {
+    color: var(--bs-secondary-color);
+    text-align: end;
+}
+
+.form-floating > .form-control-plaintext:focus::placeholder, .form-floating > .form-control:focus::placeholder {
+    text-align: start;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+/* 过渡动画 */
+* {
+    transition-property: background-color, border-color, box-shadow;
+    transition-duration: 0.15s;
+    transition-timing-function: ease-in-out;
+}
+
+/* 加载动画 */
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid #ddd;
+    border-top-color: var(--primary-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}

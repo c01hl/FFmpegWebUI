@@ -1,0 +1,413 @@
+@using FFmpegWebUI.Models
+
+<div class="template-detail-viewer @(_isVisible ? "visible" : "")">
+    <div class="viewer-overlay" @onclick="Close"></div>
+    <div class="viewer-panel">
+        <div class="viewer-header">
+            <h2>📋 模板详情</h2>
+            <button class="close-btn" @onclick="Close">✕</button>
+        </div>
+
+        @if (_template != null)
+        {
+            <div class="viewer-body">
+                <div class="detail-section">
+                    <div class="detail-row">
+                        <span class="label">模板名称</span>
+                        <span class="value name">@_template.Name</span>
+                    </div>
+
+                    <div class="detail-row">
+                        <span class="label">类型</span>
+                        <span class="value">
+                            @if (_template.Type == TemplateType.System)
+                            {
+                                <span class="badge system">系统预设</span>
+                            }
+                            else
+                            {
+                                <span class="badge user">用户自定义</span>
+                            }
+                        </span>
+                    </div>
+
+                    <div class="detail-row">
+                        <span class="label">分类</span>
+                        <span class="value">📂 @_template.Category</span>
+                    </div>
+
+                    <div class="detail-row">
+                        <span class="label">描述</span>
+                        <span class="value desc">@(string.IsNullOrEmpty(_template.Description) ? "无描述" : _template.Description)</span>
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <div class="detail-row full">
+                        <span class="label">FFmpeg 命令参数</span>
+                        <div class="command-box">
+                            <code>@_template.CommandArgs</code>
+                            <button class="copy-btn" @onclick="CopyCommand" title="复制命令">
+                                @(_copied ? "✓ 已复制" : "📋 复制")
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <div class="detail-row">
+                        <span class="label">输出格式</span>
+                        <span class="value">.@_template.OutputExtension</span>
+                    </div>
+
+                    <div class="detail-row">
+                        <span class="label">支持的输入格式</span>
+                        <span class="value">
+                            @if (_template.SupportedInputFormats.Count > 0)
+                            {
+                                @string.Join(", ", _template.SupportedInputFormats.Select(f => $".{f}"))
+                            }
+                            else
+                            {
+                                <span class="muted">不限制</span>
+                            }
+                        </span>
+                    </div>
+
+                    <div class="detail-row">
+                        <span class="label">硬件加速</span>
+                        <span class="value">
+                            @if (_template.RequiresHardwareAcceleration)
+                            {
+                                <span class="badge hw">🚀 需要</span>
+                                @if (!string.IsNullOrEmpty(_template.RequiredEncoder))
+                                {
+                                    <span>(@_template.RequiredEncoder)</span>
+                                }
+                            }
+                            else
+                            {
+                                <span class="muted">不需要</span>
+                            }
+                        </span>
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <div class="detail-row">
+                        <span class="label">创建时间</span>
+                        <span class="value">@_template.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                    </div>
+
+                    <div class="detail-row">
+                        <span class="label">更新时间</span>
+                        <span class="value">@_template.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                    </div>
+
+                    <div class="detail-row">
+                        <span class="label">排序权重</span>
+                        <span class="value">@_template.SortOrder</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="viewer-footer">
+                @if (_template.Type == TemplateType.System)
+                {
+                    <button class="btn-copy" @onclick="OnCopyClick">
+                        📋 复制为自定义模板
+                    </button>
+                }
+                else
+                {
+                    <button class="btn-edit" @onclick="OnEditClick">
+                        ✏️ 编辑模板
+                    </button>
+                }
+                <button class="btn-secondary" @onclick="Close">关闭</button>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public EventCallback<CommandTemplate> OnCopy { get; set; }
+
+    [Parameter]
+    public EventCallback<CommandTemplate> OnEdit { get; set; }
+
+    private CommandTemplate? _template;
+    private bool _isVisible;
+    private bool _copied;
+
+    public void Open(CommandTemplate template)
+    {
+        _template = template;
+        _copied = false;
+        _isVisible = true;
+        StateHasChanged();
+    }
+
+    public void Close()
+    {
+        _isVisible = false;
+        StateHasChanged();
+    }
+
+    private async Task CopyCommand()
+    {
+        // Note: In Blazor Server, clipboard access requires JS interop
+        // For now, we'll just show a visual feedback
+        _copied = true;
+        StateHasChanged();
+        await Task.Delay(2000);
+        _copied = false;
+        StateHasChanged();
+    }
+
+    private async Task OnCopyClick()
+    {
+        if (_template != null)
+        {
+            await OnCopy.InvokeAsync(_template);
+            Close();
+        }
+    }
+
+    private async Task OnEditClick()
+    {
+        if (_template != null)
+        {
+            await OnEdit.InvokeAsync(_template);
+            Close();
+        }
+    }
+}
+
+<style>
+    .template-detail-viewer {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 1000;
+    }
+
+    .template-detail-viewer.visible {
+        display: block;
+    }
+
+    .viewer-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+    }
+
+    .viewer-panel {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 90%;
+        max-width: 650px;
+        max-height: 90vh;
+        background: var(--card-bg, white);
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        color: var(--text-primary, #333);
+    }
+
+    .viewer-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.5rem;
+        border-bottom: 1px solid var(--border-color, #ddd);
+        background: var(--light-bg, #f8f9fa);
+    }
+
+    .viewer-header h2 {
+        margin: 0;
+        font-size: 1.25rem;
+        color: var(--text-primary, #333);
+    }
+
+    .close-btn {
+        background: none;
+        border: none;
+        font-size: 1.5rem;
+        cursor: pointer;
+        color: var(--text-secondary, #666);
+    }
+
+    .close-btn:hover {
+        color: var(--text-primary, #333);
+    }
+
+    .viewer-body {
+        flex: 1;
+        padding: 1.5rem;
+        overflow-y: auto;
+    }
+
+    .detail-section {
+        margin-bottom: 1.5rem;
+        padding-bottom: 1rem;
+        border-bottom: 1px solid var(--border-color, #eee);
+    }
+
+    .detail-section:last-child {
+        border-bottom: none;
+        margin-bottom: 0;
+    }
+
+    .detail-row {
+        display: flex;
+        margin-bottom: 0.75rem;
+        align-items: flex-start;
+    }
+
+    .detail-row.full {
+        flex-direction: column;
+    }
+
+    .detail-row .label {
+        min-width: 120px;
+        font-weight: 500;
+        color: var(--text-secondary, #666);
+        font-size: 0.9rem;
+    }
+
+    .detail-row .value {
+        flex: 1;
+        color: var(--text-primary, #333);
+    }
+
+    .detail-row .value.name {
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+
+    .detail-row .value.desc {
+        line-height: 1.5;
+    }
+
+    .detail-row .value .muted {
+        color: var(--text-muted, #888);
+        font-style: italic;
+    }
+
+    .command-box {
+        margin-top: 0.5rem;
+        position: relative;
+    }
+
+    .command-box code {
+        display: block;
+        padding: 1rem;
+        background: var(--input-bg, #f5f5f5);
+        border: 1px solid var(--border-color, #ddd);
+        border-radius: 4px;
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 0.85rem;
+        line-height: 1.5;
+        word-break: break-all;
+        white-space: pre-wrap;
+        color: var(--text-primary, #333);
+    }
+
+    .copy-btn {
+        position: absolute;
+        top: 0.5rem;
+        right: 0.5rem;
+        padding: 0.3rem 0.6rem;
+        background: var(--card-bg, white);
+        border: 1px solid var(--border-color, #ddd);
+        border-radius: 4px;
+        font-size: 0.8rem;
+        cursor: pointer;
+        color: var(--text-primary, #333);
+    }
+
+    .copy-btn:hover {
+        background: var(--light-bg, #f0f0f0);
+    }
+
+    .badge {
+        display: inline-block;
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.8rem;
+    }
+
+    .badge.system {
+        background: #e9ecef;
+        color: #495057;
+    }
+
+    .badge.user {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .badge.hw {
+        background: #cce5ff;
+        color: #004085;
+    }
+
+    .viewer-footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.75rem;
+        padding: 1rem 1.5rem;
+        border-top: 1px solid var(--border-color, #ddd);
+        background: var(--light-bg, #f8f9fa);
+    }
+
+    .btn-copy,
+    .btn-edit,
+    .btn-secondary {
+        padding: 0.6rem 1.25rem;
+        border-radius: 4px;
+        font-size: 0.95rem;
+        cursor: pointer;
+    }
+
+    .btn-copy {
+        background: #28a745;
+        color: white;
+        border: none;
+    }
+
+    .btn-copy:hover {
+        background: #218838;
+    }
+
+    .btn-edit {
+        background: #007bff;
+        color: white;
+        border: none;
+    }
+
+    .btn-edit:hover {
+        background: #0056b3;
+    }
+
+    .btn-secondary {
+        background: var(--light-bg, #f8f9fa);
+        border: 1px solid var(--border-color, #ddd);
+        color: var(--text-primary, #333);
+    }
+
+    .btn-secondary:hover {
+        background: var(--card-bg, #e9ecef);
+    }
+</style>

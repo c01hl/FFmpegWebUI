@@ -1,0 +1,246 @@
+@using FFmpegWebUI.Services
+@inject IFileService FileService
+
+<div class="file-selector">
+    <label class="file-label">@Label</label>
+    <div class="input-group">
+        <input type="text" 
+               class="file-input @(IsValid ? "" : "invalid")"
+               value="@Value"
+               placeholder="@Placeholder"
+               @oninput="OnInputChanged"
+               @ondragover="OnDragOver"
+               @ondrop="OnDrop" />
+        @if (ShowBrowse)
+        {
+            <button type="button" class="browse-btn" @onclick="OnBrowseClick">
+                📂 浏览
+            </button>
+        }
+    </div>
+    @if (!string.IsNullOrEmpty(ErrorMessage))
+    {
+        <span class="error-message">@ErrorMessage</span>
+    }
+    @if (!string.IsNullOrEmpty(Value) && ShowFileInfo && _fileSize > 0)
+    {
+        <span class="file-info">文件大小: @FormatFileSize(_fileSize)</span>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public string Label { get; set; } = "文件路径";
+
+    [Parameter]
+    public string Value { get; set; } = string.Empty;
+
+    [Parameter]
+    public EventCallback<string> ValueChanged { get; set; }
+
+    [Parameter]
+    public string Placeholder { get; set; } = "输入文件路径或拖拽文件到此处";
+
+    [Parameter]
+    public bool ShowBrowse { get; set; } = true;
+
+    [Parameter]
+    public bool ShowFileInfo { get; set; } = true;
+
+    [Parameter]
+    public bool ValidateExists { get; set; } = true;
+
+    [Parameter]
+    public List<string>? AllowedExtensions { get; set; }
+
+    [Parameter]
+    public bool IsDirectory { get; set; }
+
+    private bool IsValid => string.IsNullOrEmpty(ErrorMessage);
+    private string? ErrorMessage;
+    private long _fileSize;
+
+    protected override void OnParametersSet()
+    {
+        Validate();
+    }
+
+    private async Task OnInputChanged(ChangeEventArgs e)
+    {
+        var newValue = e.Value?.ToString() ?? string.Empty;
+        await UpdateValue(newValue);
+    }
+
+    private async Task UpdateValue(string newValue)
+    {
+        Value = newValue.Trim().Trim('"');
+        Validate();
+        await ValueChanged.InvokeAsync(Value);
+    }
+
+    private void Validate()
+    {
+        ErrorMessage = null;
+        _fileSize = 0;
+
+        if (string.IsNullOrEmpty(Value))
+        {
+            return;
+        }
+
+        if (ValidateExists)
+        {
+            if (IsDirectory)
+            {
+                if (!Directory.Exists(Value))
+                {
+                    ErrorMessage = "目录不存在";
+                    return;
+                }
+            }
+            else
+            {
+                if (!FileService.IsFileAccessible(Value))
+                {
+                    ErrorMessage = "文件不存在或无法访问";
+                    return;
+                }
+
+                _fileSize = FileService.GetFileSize(Value);
+            }
+        }
+
+        if (AllowedExtensions != null && AllowedExtensions.Count > 0 && !IsDirectory)
+        {
+            var ext = Path.GetExtension(Value).TrimStart('.').ToLower();
+            if (!AllowedExtensions.Contains(ext))
+            {
+                ErrorMessage = $"不支持的文件格式，允许: {string.Join(", ", AllowedExtensions)}";
+            }
+        }
+    }
+
+    private void OnDragOver(DragEventArgs e)
+    {
+        e.DataTransfer.DropEffect = "copy";
+    }
+
+    private async Task OnDrop(DragEventArgs e)
+    {
+        // 注意: Blazor Server 不支持直接获取拖拽的文件路径
+        // 用户需要手动粘贴路径
+    }
+
+    private async Task OnBrowseClick()
+    {
+        string? selectedPath;
+        
+        if (IsDirectory)
+        {
+            selectedPath = await FileService.OpenFolderDialogAsync(
+                title: $"选择{Label}",
+                initialDirectory: string.IsNullOrEmpty(Value) ? null : Value
+            );
+        }
+        else
+        {
+            // 构建文件过滤器
+            string? filter = null;
+            if (AllowedExtensions != null && AllowedExtensions.Count > 0)
+            {
+                var extPattern = string.Join(";", AllowedExtensions.Select(e => $"*.{e.TrimStart('.')}"));
+                filter = $"允许的文件|{extPattern}|所有文件|*.*";
+            }
+            
+            selectedPath = await FileService.OpenFileDialogAsync(
+                title: $"选择{Label}",
+                filter: filter,
+                initialDirectory: string.IsNullOrEmpty(Value) ? null : Path.GetDirectoryName(Value)
+            );
+        }
+        
+        if (!string.IsNullOrEmpty(selectedPath))
+        {
+            await UpdateValue(selectedPath);
+        }
+    }
+
+    private static string FormatFileSize(long bytes)
+    {
+        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
+        int order = 0;
+        double size = bytes;
+        while (size >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            size /= 1024;
+        }
+        return $"{size:0.##} {sizes[order]}";
+    }
+}
+
+<style>
+    .file-selector {
+        margin-bottom: 1rem;
+    }
+
+    .file-label {
+        display: block;
+        font-weight: 500;
+        margin-bottom: 0.5rem;
+        color: #333;
+    }
+
+    .input-group {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .file-input {
+        flex: 1;
+        padding: 0.75rem;
+        border: 2px solid #ddd;
+        border-radius: 6px;
+        font-size: 0.95rem;
+        transition: border-color 0.2s;
+    }
+
+    .file-input:focus {
+        outline: none;
+        border-color: #007bff;
+    }
+
+    .file-input.invalid {
+        border-color: #dc3545;
+    }
+
+    .browse-btn {
+        padding: 0.75rem 1rem;
+        border: 2px solid #007bff;
+        border-radius: 6px;
+        background: #007bff;
+        color: white;
+        font-size: 0.95rem;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background 0.2s;
+    }
+
+    .browse-btn:hover {
+        background: #0056b3;
+    }
+
+    .error-message {
+        display: block;
+        color: #dc3545;
+        font-size: 0.85rem;
+        margin-top: 0.25rem;
+    }
+
+    .file-info {
+        display: block;
+        color: #666;
+        font-size: 0.85rem;
+        margin-top: 0.25rem;
+    }
+</style>

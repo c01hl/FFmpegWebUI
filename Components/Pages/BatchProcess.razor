@@ -1,0 +1,380 @@
+@page "/batch"
+@using FFmpegWebUI.Models
+@using FFmpegWebUI.Services
+@using FFmpegWebUI.Components.Shared
+@using TaskStatus = FFmpegWebUI.Models.TaskStatus
+@inject ITaskService TaskService
+@inject ITemplateService TemplateService
+@inject IFileService FileService
+@inject ISettingsService SettingsService
+@rendermode InteractiveServer
+
+<PageTitle>批量处理 - FFmpeg Web UI</PageTitle>
+
+<div class="batch-container">
+    <h1>📁 批量处理</h1>
+
+    <div class="batch-layout">
+        <div class="left-panel">
+            <div class="file-section">
+                <BatchFileList @bind-Files="_files"
+                               FileStatuses="_fileStatuses"
+                               IsProcessing="_isProcessing" />
+            </div>
+
+            <div class="output-section">
+                <h3>输出设置</h3>
+                <FileSelector Label="输出目录"
+                              @bind-Value="_outputDirectory"
+                              Placeholder="选择输出目录"
+                              IsDirectory="true"
+                              ValidateExists="false" />
+            </div>
+        </div>
+
+        <div class="right-panel">
+            <div class="template-section">
+                <TemplateSelector @bind-SelectedTemplate="_selectedTemplate" />
+            </div>
+        </div>
+    </div>
+
+    <div class="action-section">
+        <button class="btn-primary" @onclick="StartBatch" disabled="@(!CanStart)">
+            @if (_isProcessing)
+            {
+                <span class="spinner-small"></span>
+                <span>处理中...</span>
+            }
+            else
+            {
+                <span>🚀 开始批量处理</span>
+            }
+        </button>
+
+        @if (_isProcessing)
+        {
+            <button class="btn-cancel" @onclick="CancelBatch">
+                ❌ 取消全部
+            </button>
+        }
+
+        @if (_files.Count > 0 && _selectedTemplate != null)
+        {
+            <span class="summary-text">
+                将处理 @_files.Count 个文件，输出格式: .@_selectedTemplate.OutputExtension
+            </span>
+        }
+    </div>
+
+    @if (_batchTask != null || _isProcessing || _completedTasks.Count > 0)
+    {
+        <div class="progress-section">
+            <BatchProgressPanel TotalCount="_totalCount"
+                                CompletedCount="_completedCount"
+                                FailedCount="_failedCount"
+                                RunningCount="@(_isProcessing ? 1 : 0)"
+                                CurrentTask="_currentTask"
+                                FailedTasks="_failedTasks"
+                                IsProcessing="_isProcessing" />
+        </div>
+    }
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="message @_messageClass">@_message</div>
+    }
+</div>
+
+@code {
+    private List<string> _files = [];
+    private Dictionary<string, string> _fileStatuses = [];
+    private string _outputDirectory = string.Empty;
+    private CommandTemplate? _selectedTemplate;
+    private BatchTask? _batchTask;
+    private ConversionTask? _currentTask;
+    private List<ConversionTask> _completedTasks = [];
+    private List<ConversionTask> _failedTasks = [];
+    private bool _isProcessing;
+    private int _totalCount;
+    private int _completedCount;
+    private int _failedCount;
+    private string _message = string.Empty;
+    private string _messageClass = string.Empty;
+    private CancellationTokenSource? _cts;
+
+    private bool CanStart => !_isProcessing &&
+                             _files.Count > 0 &&
+                             !string.IsNullOrEmpty(_outputDirectory) &&
+                             _selectedTemplate != null;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var settings = await SettingsService.GetSettingsAsync();
+        _outputDirectory = settings.DefaultOutputDirectory;
+
+        TaskService.TaskProgressChanged += OnProgressChanged;
+        TaskService.TaskStatusChanged += OnStatusChanged;
+    }
+
+    private async Task StartBatch()
+    {
+        if (!CanStart || _selectedTemplate == null) return;
+
+        _isProcessing = true;
+        _message = string.Empty;
+        _completedTasks.Clear();
+        _failedTasks.Clear();
+        _fileStatuses.Clear();
+        _totalCount = _files.Count;
+        _completedCount = 0;
+        _failedCount = 0;
+        _cts = new CancellationTokenSource();
+
+        StateHasChanged();
+
+        try
+        {
+            // 确保输出目录存在
+            if (!Directory.Exists(_outputDirectory))
+            {
+                Directory.CreateDirectory(_outputDirectory);
+            }
+
+            // 创建批量任务
+            _batchTask = await TaskService.CreateBatchTaskAsync(
+                _files.ToList(),
+                _outputDirectory,
+                _selectedTemplate.Id);
+
+            // 获取所有子任务并顺序执行
+            var tasks = await TaskService.GetTaskHistoryAsync(
+                limit: _files.Count,
+                status: TaskStatus.Pending);
+
+            tasks = tasks.Where(t => t.BatchId == _batchTask.Id).ToList();
+
+            foreach (var task in tasks)
+            {
+                if (_cts.Token.IsCancellationRequested) break;
+
+                _currentTask = task;
+                _fileStatuses[task.InputPath] = "Running";
+                StateHasChanged();
+
+                try
+                {
+                    await TaskService.StartTaskAsync(task.Id);
+                }
+                catch (Exception ex)
+                {
+                    // 任务执行失败，继续下一个
+                    _fileStatuses[task.InputPath] = "Failed";
+                    _failedTasks.Add(task);
+                    _failedCount++;
+                }
+            }
+
+            // 批量处理完成
+            _message = _failedCount == 0
+                ? $"✅ 批量处理完成！成功转换 {_completedCount} 个文件"
+                : $"⚠️ 批量处理完成，成功 {_completedCount} 个，失败 {_failedCount} 个";
+            _messageClass = _failedCount == 0 ? "success" : "warning";
+        }
+        catch (Exception ex)
+        {
+            _message = $"批量处理失败: {ex.Message}";
+            _messageClass = "error";
+        }
+        finally
+        {
+            _isProcessing = false;
+            _currentTask = null;
+            _cts?.Dispose();
+            _cts = null;
+            StateHasChanged();
+        }
+    }
+
+    private async Task CancelBatch()
+    {
+        _cts?.Cancel();
+
+        if (_currentTask != null)
+        {
+            await TaskService.CancelTaskAsync(_currentTask.Id);
+        }
+
+        _message = "批量处理已取消";
+        _messageClass = "warning";
+    }
+
+    private void OnProgressChanged(object? sender, TaskProgressEventArgs e)
+    {
+        if (_currentTask?.Id == e.TaskId)
+        {
+            _currentTask.Progress = e.Progress;
+            _currentTask.ProcessingSpeed = e.Speed;
+            _currentTask.EstimatedTimeRemaining = e.Eta;
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void OnStatusChanged(object? sender, TaskStatusEventArgs e)
+    {
+        if (_currentTask?.Id == e.TaskId)
+        {
+            _currentTask.Status = e.NewStatus;
+
+            switch (e.NewStatus)
+            {
+                case TaskStatus.Completed:
+                    _fileStatuses[_currentTask.InputPath] = "Completed";
+                    _completedTasks.Add(_currentTask);
+                    _completedCount++;
+                    break;
+                case TaskStatus.Failed:
+                    _fileStatuses[_currentTask.InputPath] = "Failed";
+                    _currentTask.ErrorMessage = e.ErrorMessage;
+                    _failedTasks.Add(_currentTask);
+                    _failedCount++;
+                    break;
+                case TaskStatus.Cancelled:
+                    _fileStatuses[_currentTask.InputPath] = "Cancelled";
+                    _failedCount++;
+                    break;
+            }
+
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    public void Dispose()
+    {
+        TaskService.TaskProgressChanged -= OnProgressChanged;
+        TaskService.TaskStatusChanged -= OnStatusChanged;
+        _cts?.Dispose();
+    }
+}
+
+<style>
+    .batch-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    h1 {
+        margin-bottom: 1.5rem;
+    }
+
+    .batch-layout {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 2rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .left-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+    }
+
+    .output-section h3 {
+        margin-top: 0;
+        margin-bottom: 1rem;
+        font-size: 1rem;
+    }
+
+    .action-section {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .btn-primary {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 1rem 2rem;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-size: 1rem;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+        background: #0056b3;
+    }
+
+    .btn-primary:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+    }
+
+    .btn-cancel {
+        padding: 1rem 1.5rem;
+        background: #dc3545;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+    }
+
+    .btn-cancel:hover {
+        background: #c82333;
+    }
+
+    .spinner-small {
+        width: 16px;
+        height: 16px;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-top-color: white;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+
+    @@keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .summary-text {
+        color: #666;
+        font-size: 0.95rem;
+    }
+
+    .progress-section {
+        margin-bottom: 1.5rem;
+    }
+
+    .message {
+        padding: 1rem;
+        border-radius: 8px;
+        font-size: 0.95rem;
+    }
+
+    .message.success {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .message.error {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .message.warning {
+        background: #fff3cd;
+        color: #856404;
+    }
+
+    @@media (max-width: 1000px) {
+        .batch-layout {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>

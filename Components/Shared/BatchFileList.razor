@@ -1,0 +1,583 @@
+@using FFmpegWebUI.Services
+@inject IFileService FileService
+
+<div class="batch-file-list">
+    <div class="list-header">
+        <span class="list-title">📁 文件列表 (@Files.Count)</span>
+        <div class="list-actions">
+            <button class="btn-action" @onclick="ClearAll" disabled="@(Files.Count == 0 || IsProcessing)">
+                🗑️ 清空
+            </button>
+        </div>
+    </div>
+
+    <div class="add-section">
+        <div class="add-buttons">
+            <button class="btn-browse" @onclick="BrowseFiles" disabled="@IsProcessing">
+                📄 选择文件
+            </button>
+            <button class="btn-browse folder" @onclick="BrowseFolder" disabled="@IsProcessing">
+                📂 选择文件夹
+            </button>
+        </div>
+        <div class="add-options">
+            <label class="checkbox-option">
+                <input type="checkbox" @bind="_recursiveSearch" disabled="@IsProcessing" />
+                <span>包含子文件夹</span>
+            </label>
+        </div>
+        <div class="add-manual">
+            <input type="text" 
+                   placeholder="或手动输入文件/文件夹路径后按回车..."
+                   @bind="_inputPath"
+                   @onkeydown="OnKeyDown"
+                   disabled="@IsProcessing" />
+            <button class="btn-add" @onclick="AddFile" disabled="@IsProcessing">➕</button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_errorMessage))
+    {
+        <div class="error-message">@_errorMessage</div>
+    }
+
+    @if (!string.IsNullOrEmpty(_infoMessage))
+    {
+        <div class="info-message">@_infoMessage</div>
+    }
+
+    <div class="file-items">
+        @if (Files.Count == 0)
+        {
+            <div class="empty-state">
+                <p>暂无文件，请添加要处理的媒体文件</p>
+            </div>
+        }
+        else
+        {
+            @foreach (var (file, index) in Files.Select((f, i) => (f, i)))
+            {
+                <div class="file-item @(GetFileStatus(file))">
+                    <span class="file-index">@(index + 1)</span>
+                    <div class="file-info">
+                        <span class="file-name" title="@file">@Path.GetFileName(file)</span>
+                        <span class="file-size">@FormatFileSize(FileService.GetFileSize(file))</span>
+                    </div>
+                    @if (FileStatuses.TryGetValue(file, out var status))
+                    {
+                        <span class="file-status @status.ToLower()">
+                            @GetStatusIcon(status) @status
+                        </span>
+                    }
+                    <button class="btn-remove" @onclick="() => RemoveFile(index)" 
+                            disabled="@IsProcessing" title="移除">
+                        ✕
+                    </button>
+                </div>
+            }
+        }
+    </div>
+
+    <div class="list-footer">
+        <span>总计: @Files.Count 个文件</span>
+        <span>大小: @FormatFileSize(Files.Sum(f => FileService.GetFileSize(f)))</span>
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public List<string> Files { get; set; } = [];
+
+    [Parameter]
+    public EventCallback<List<string>> FilesChanged { get; set; }
+
+    [Parameter]
+    public Dictionary<string, string> FileStatuses { get; set; } = [];
+
+    [Parameter]
+    public bool IsProcessing { get; set; }
+
+    [Parameter]
+    public List<string>? AllowedExtensions { get; set; }
+
+    private string _inputPath = string.Empty;
+    private string _errorMessage = string.Empty;
+    private string _infoMessage = string.Empty;
+    private bool _recursiveSearch = false;
+
+    // 默认支持的媒体文件扩展名
+    private static readonly List<string> DefaultMediaExtensions = 
+    [
+        "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v", "ts", "mts", "m2ts",
+        "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus"
+    ];
+
+    private List<string> SupportedExtensions => AllowedExtensions ?? DefaultMediaExtensions;
+
+    private async Task BrowseFiles()
+    {
+        _errorMessage = string.Empty;
+        _infoMessage = string.Empty;
+
+        var extPattern = string.Join(";", SupportedExtensions.Select(e => $"*.{e}"));
+        var filter = $"媒体文件|{extPattern}|所有文件|*.*";
+
+        var path = await FileService.OpenFileDialogAsync("选择媒体文件", filter);
+        if (!string.IsNullOrEmpty(path))
+        {
+            await AddFilePath(path);
+        }
+    }
+
+    private async Task BrowseFolder()
+    {
+        _errorMessage = string.Empty;
+        _infoMessage = string.Empty;
+
+        var folder = await FileService.OpenFolderDialogAsync("选择包含媒体文件的文件夹");
+        if (!string.IsNullOrEmpty(folder))
+        {
+            var mediaFiles = FileService.ScanMediaFiles(folder, SupportedExtensions, _recursiveSearch);
+            
+            if (mediaFiles.Count == 0)
+            {
+                _errorMessage = _recursiveSearch 
+                    ? "所选文件夹及其子文件夹中没有找到支持的媒体文件"
+                    : "所选文件夹中没有找到支持的媒体文件";
+                return;
+            }
+
+            var addedCount = 0;
+            var skippedCount = 0;
+
+            foreach (var file in mediaFiles)
+            {
+                if (!Files.Contains(file, StringComparer.OrdinalIgnoreCase))
+                {
+                    Files.Add(file);
+                    addedCount++;
+                }
+                else
+                {
+                    skippedCount++;
+                }
+            }
+
+            await FilesChanged.InvokeAsync(Files);
+
+            var recursiveNote = _recursiveSearch ? "（含子文件夹）" : "";
+            if (skippedCount > 0)
+            {
+                _infoMessage = $"已添加 {addedCount} 个文件{recursiveNote}，跳过 {skippedCount} 个重复文件";
+            }
+            else
+            {
+                _infoMessage = $"已添加 {addedCount} 个文件{recursiveNote}";
+            }
+        }
+    }
+
+    private async Task AddFilePath(string path)
+    {
+        if (!FileService.IsFileAccessible(path))
+        {
+            _errorMessage = "文件不存在或无法访问";
+            return;
+        }
+
+        if (Files.Contains(path, StringComparer.OrdinalIgnoreCase))
+        {
+            _errorMessage = "文件已在列表中";
+            return;
+        }
+
+        var ext = Path.GetExtension(path).TrimStart('.').ToLower();
+        if (!SupportedExtensions.Contains(ext))
+        {
+            _errorMessage = $"不支持的文件格式: .{ext}";
+            return;
+        }
+
+        Files.Add(path);
+        await FilesChanged.InvokeAsync(Files);
+        _infoMessage = $"已添加: {Path.GetFileName(path)}";
+    }
+
+    private async Task AddFile()
+    {
+        _errorMessage = string.Empty;
+        _infoMessage = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(_inputPath))
+        {
+            return;
+        }
+
+        var path = _inputPath.Trim().Trim('"');
+
+        // 检查是否是目录
+        if (Directory.Exists(path))
+        {
+            var mediaFiles = FileService.ScanMediaFiles(path, SupportedExtensions, _recursiveSearch);
+            
+            if (mediaFiles.Count == 0)
+            {
+                _errorMessage = _recursiveSearch
+                    ? "所选文件夹及其子文件夹中没有找到支持的媒体文件"
+                    : "所选文件夹中没有找到支持的媒体文件";
+                return;
+            }
+
+            var addedCount = 0;
+            var skippedCount = 0;
+            foreach (var file in mediaFiles)
+            {
+                if (!Files.Contains(file, StringComparer.OrdinalIgnoreCase))
+                {
+                    Files.Add(file);
+                    addedCount++;
+                }
+                else
+                {
+                    skippedCount++;
+                }
+            }
+
+            _inputPath = string.Empty;
+            await FilesChanged.InvokeAsync(Files);
+            
+            var recursiveNote = _recursiveSearch ? "（含子文件夹）" : "";
+            if (skippedCount > 0)
+            {
+                _infoMessage = $"已从文件夹添加 {addedCount} 个文件{recursiveNote}，跳过 {skippedCount} 个重复";
+            }
+            else
+            {
+                _infoMessage = $"已从文件夹添加 {addedCount} 个文件{recursiveNote}";
+            }
+            return;
+        }
+
+        // 单个文件
+        await AddFilePath(path);
+        if (string.IsNullOrEmpty(_errorMessage))
+        {
+            _inputPath = string.Empty;
+        }
+    }
+
+    private async Task RemoveFile(int index)
+    {
+        if (index >= 0 && index < Files.Count)
+        {
+            Files.RemoveAt(index);
+            await FilesChanged.InvokeAsync(Files);
+        }
+    }
+
+    private async Task ClearAll()
+    {
+        Files.Clear();
+        await FilesChanged.InvokeAsync(Files);
+    }
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await AddFile();
+        }
+    }
+
+    private string GetFileStatus(string file)
+    {
+        if (FileStatuses.TryGetValue(file, out var status))
+        {
+            return status.ToLower();
+        }
+        return "pending";
+    }
+
+    private static string GetStatusIcon(string status) => status switch
+    {
+        "Completed" => "✓",
+        "Failed" => "✗",
+        "Running" => "⏳",
+        "Cancelled" => "⚠️",
+        _ => "○"
+    };
+
+    private static string FormatFileSize(long bytes)
+    {
+        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
+        int order = 0;
+        double size = bytes;
+        while (size >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            size /= 1024;
+        }
+        return $"{size:0.##} {sizes[order]}";
+    }
+}
+
+<style>
+    .batch-file-list {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: white;
+        overflow: hidden;
+    }
+
+    .list-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem 1rem;
+        background: #f8f9fa;
+        border-bottom: 1px solid #ddd;
+    }
+
+    .list-title {
+        font-weight: 600;
+    }
+
+    .btn-action {
+        padding: 0.3rem 0.6rem;
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.85rem;
+    }
+
+    .btn-action:hover:not(:disabled) {
+        background: #f0f0f0;
+    }
+
+    .btn-action:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .add-section {
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid #eee;
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+    }
+
+    .add-buttons {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .btn-browse {
+        padding: 0.5rem 1rem;
+        background: #28a745;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: background 0.2s;
+    }
+
+    .btn-browse:hover:not(:disabled) {
+        background: #218838;
+    }
+
+    .btn-browse.folder {
+        background: #17a2b8;
+    }
+
+    .btn-browse.folder:hover:not(:disabled) {
+        background: #138496;
+    }
+
+    .btn-browse:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .add-options {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+
+    .checkbox-option {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.85rem;
+        color: #555;
+        cursor: pointer;
+    }
+
+    .checkbox-option input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        accent-color: #17a2b8;
+        cursor: pointer;
+    }
+
+    .checkbox-option input[type="checkbox"]:disabled {
+        cursor: not-allowed;
+    }
+
+    .add-manual {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .add-manual input {
+        flex: 1;
+        padding: 0.5rem;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+
+    .add-manual input:focus {
+        outline: none;
+        border-color: #007bff;
+    }
+
+    .add-manual input:disabled {
+        background: #f5f5f5;
+        cursor: not-allowed;
+    }
+
+    .btn-add {
+        padding: 0.5rem 1rem;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+
+    .btn-add:hover:not(:disabled) {
+        background: #0056b3;
+    }
+
+    .btn-add:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .error-message {
+        padding: 0.5rem 1rem;
+        background: #f8d7da;
+        color: #721c24;
+        font-size: 0.85rem;
+    }
+
+    .info-message {
+        padding: 0.5rem 1rem;
+        background: #d4edda;
+        color: #155724;
+        font-size: 0.85rem;
+    }
+
+    .file-items {
+        max-height: 300px;
+        overflow-y: auto;
+    }
+
+    .empty-state {
+        padding: 2rem;
+        text-align: center;
+        color: #666;
+    }
+
+    .file-item {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.6rem 1rem;
+        border-bottom: 1px solid #eee;
+    }
+
+    .file-item:hover {
+        background: #f8f9fa;
+    }
+
+    .file-item.running {
+        background: #e7f1ff;
+    }
+
+    .file-item.completed {
+        background: #d4edda;
+    }
+
+    .file-item.failed {
+        background: #f8d7da;
+    }
+
+    .file-index {
+        min-width: 24px;
+        text-align: center;
+        font-size: 0.8rem;
+        color: #888;
+    }
+
+    .file-info {
+        flex: 1;
+        overflow: hidden;
+    }
+
+    .file-name {
+        display: block;
+        font-size: 0.9rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .file-size {
+        font-size: 0.75rem;
+        color: #888;
+    }
+
+    .file-status {
+        font-size: 0.8rem;
+        padding: 0.2rem 0.5rem;
+        border-radius: 3px;
+        white-space: nowrap;
+    }
+
+    .file-status.completed { color: #155724; }
+    .file-status.failed { color: #721c24; }
+    .file-status.running { color: #004085; }
+
+    .btn-remove {
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: #999;
+        font-size: 1rem;
+        padding: 0.2rem;
+    }
+
+    .btn-remove:hover:not(:disabled) {
+        color: #dc3545;
+    }
+
+    .btn-remove:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+    }
+
+    .list-footer {
+        display: flex;
+        justify-content: space-between;
+        padding: 0.5rem 1rem;
+        background: #f8f9fa;
+        border-top: 1px solid #ddd;
+        font-size: 0.85rem;
+        color: #666;
+    }
+</style>

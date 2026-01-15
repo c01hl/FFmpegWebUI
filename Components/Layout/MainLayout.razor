@@ -1,0 +1,36 @@
+﻿@inherits LayoutComponentBase
+@using FFmpegWebUI.Services
+@inject ISettingsService SettingsService
+
+<div class="page" data-theme="@_theme">
+    <div class="sidebar">
+        <NavMenu />
+    </div>
+
+    <main>
+        <div class="top-row px-4">
+            <span class="app-title">FFmpeg Web UI</span>
+            <span class="version">v1.0</span>
+        </div>
+
+        <article class="content px-4">
+            @Body
+        </article>
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    发生了未处理的错误。
+    <a href="." class="reload">重新加载</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@code {
+    private string _theme = "System";
+
+    protected override async Task OnInitializedAsync()
+    {
+        var settings = await SettingsService.GetSettingsAsync();
+        _theme = settings.Theme;
+    }
+}

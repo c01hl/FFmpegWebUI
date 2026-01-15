@@ -1,0 +1,592 @@
+@page "/convert"
+@using FFmpegWebUI.Models
+@using FFmpegWebUI.Services
+@using FFmpegWebUI.Components.Shared
+@inject ITaskService TaskService
+@inject IFileService FileService
+@inject ISettingsService SettingsService
+@rendermode InteractiveServer
+
+<PageTitle>转换 - FFmpeg Web UI</PageTitle>
+
+<div class="convert-container">
+    <h1>🔄 媒体转换</h1>
+
+    <div class="convert-layout">
+        <div class="form-section">
+            <h2>输入设置</h2>
+            <FileSelector Label="输入文件"
+                          @bind-Value="_inputPath"
+                          Placeholder="输入视频或音频文件路径"
+                          ValidateExists="true" />
+
+            <FileSelector Label="输出目录"
+                          @bind-Value="_outputDirectory"
+                          Placeholder="输出文件保存目录"
+                          IsDirectory="true"
+                          ValidateExists="false" />
+
+            <div class="form-group">
+                <label>输出文件名</label>
+                <input type="text" @bind="_outputFileName" @bind:event="oninput" placeholder="自动生成" />
+                <span class="help-text">
+                    留空则使用原文件名。支持格式化：
+                    <code>{filename}</code> 原文件名，
+                    <code>{date}</code> 日期，
+                    <code>{now:yyMMdd}</code> 自定义日期格式
+                </span>
+                <details class="format-help">
+                    <summary>查看所有格式化占位符</summary>
+                    <div class="format-list">
+                        <div class="format-item"><code>{filename}</code> 原文件名（不含扩展名）</div>
+                        <div class="format-item"><code>{ext}</code> 原文件扩展名</div>
+                        <div class="format-item"><code>{outputext}</code> 输出扩展名</div>
+                        <div class="format-item"><code>{dir}</code> 原文件所在文件夹名</div>
+                        <div class="format-item"><code>{date}</code> 日期 (yyyyMMdd)</div>
+                        <div class="format-item"><code>{time}</code> 时间 (HHmmss)</div>
+                        <div class="format-item"><code>{datetime}</code> 日期时间 (yyyyMMdd_HHmmss)</div>
+                        <div class="format-item"><code>{year}</code> 年份 (yyyy)</div>
+                        <div class="format-item"><code>{month}</code> 月份 (MM)</div>
+                        <div class="format-item"><code>{day}</code> 日 (dd)</div>
+                        <div class="format-item"><code>{now:格式}</code> 自定义日期格式，如 <code>{now:yyMMdd_HHmm}</code></div>
+                        <div class="format-item"><code>{random}</code> 8位随机字符</div>
+                        <div class="format-item"><code>{random:N}</code> N位随机字符，如 <code>{random:4}</code></div>
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div class="template-section">
+            <TemplateSelector @bind-SelectedTemplate="_selectedTemplate" />
+        </div>
+    </div>
+
+    @if (_selectedTemplate != null && !string.IsNullOrEmpty(_inputPath))
+    {
+        <div class="preview-section">
+            <h3>预览</h3>
+            <div class="preview-info">
+                <div class="preview-item">
+                    <span class="label">输入:</span>
+                    <span class="value">@_inputPath</span>
+                </div>
+                <div class="preview-item">
+                    <span class="label">输出:</span>
+                    <span class="value">@GetOutputPath()</span>
+                </div>
+                <div class="preview-item">
+                    <span class="label">模板:</span>
+                    <span class="value">@_selectedTemplate.Name</span>
+                </div>
+            </div>
+        </div>
+    }
+
+    <div class="action-section">
+        <button class="btn-primary" 
+                @onclick="StartConversion" 
+                disabled="@(!CanStart)">
+            @if (_isProcessing)
+            {
+                <span class="spinner-small"></span>
+                <span>处理中...</span>
+            }
+            else
+            {
+                <span>🚀 开始转换</span>
+            }
+        </button>
+
+        @if (_isProcessing)
+        {
+            <button class="btn-cancel" @onclick="CancelConversion">
+                ❌ 取消
+            </button>
+        }
+    </div>
+
+    @if (_currentTask != null)
+    {
+        <div class="progress-section">
+            <ProgressBar Label="转换进度"
+                         Progress="_currentTask.Progress"
+                         Speed="_currentTask.ProcessingSpeed"
+                         Eta="_currentTask.EstimatedTimeRemaining"
+                         CurrentTime="_currentTask.CurrentTime"
+                         TotalDuration="_currentTask.TotalDuration"
+                         Status="_currentTask.Status" />
+        </div>
+
+        @if (!string.IsNullOrEmpty(_currentTask.LogOutput))
+        {
+            <div class="log-section">
+                <LogViewer LogText="@_currentTask.LogOutput" />
+            </div>
+        }
+    }
+
+    @if (!string.IsNullOrEmpty(_statusMessage))
+    {
+        <div class="status-message @_statusClass">
+            @_statusMessage
+        </div>
+    }
+
+    @if (_recentTasks.Count > 0)
+    {
+        <div class="history-section">
+            <h3>最近任务</h3>
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>输入文件</th>
+                        <th>状态</th>
+                        <th>时间</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var task in _recentTasks.Take(5))
+                    {
+                        <tr>
+                            <td>@Path.GetFileName(task.InputPath)</td>
+                            <td>
+                                <span class="status-badge @GetStatusClass(task.Status)">
+                                    @GetStatusText(task.Status)
+                                </span>
+                            </td>
+                            <td>@task.CreatedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+@code {
+    private string _inputPath = string.Empty;
+    private string _outputDirectory = string.Empty;
+    private string _outputFileName = string.Empty;
+    private CommandTemplate? _selectedTemplate;
+    private ConversionTask? _currentTask;
+    private List<ConversionTask> _recentTasks = [];
+    private bool _isProcessing;
+    private string _statusMessage = string.Empty;
+    private string _statusClass = string.Empty;
+
+    private bool CanStart => !_isProcessing &&
+                             !string.IsNullOrEmpty(_inputPath) &&
+                             !string.IsNullOrEmpty(_outputDirectory) &&
+                             _selectedTemplate != null;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadDefaults();
+        await LoadRecentTasks();
+
+        TaskService.TaskProgressChanged += OnProgressChanged;
+        TaskService.TaskStatusChanged += OnStatusChanged;
+    }
+
+    private async Task LoadDefaults()
+    {
+        var settings = await SettingsService.GetSettingsAsync();
+        _outputDirectory = settings.DefaultOutputDirectory;
+    }
+
+    private async Task LoadRecentTasks()
+    {
+        _recentTasks = await TaskService.GetTaskHistoryAsync(5);
+    }
+
+    private string GetOutputPath()
+    {
+        if (_selectedTemplate == null || string.IsNullOrEmpty(_inputPath))
+            return string.Empty;
+
+        string fileName;
+        if (!string.IsNullOrEmpty(_outputFileName))
+        {
+            // 使用格式化功能处理用户输入的文件名模板
+            fileName = FileService.FormatFileName(_outputFileName, _inputPath, _selectedTemplate.OutputExtension);
+        }
+        else
+        {
+            // 默认使用原文件名 + _converted 后缀
+            fileName = Path.GetFileNameWithoutExtension(_inputPath) + "_converted";
+        }
+
+        return Path.Combine(_outputDirectory, $"{fileName}.{_selectedTemplate.OutputExtension}");
+    }
+
+    private async Task StartConversion()
+    {
+        if (!CanStart || _selectedTemplate == null) return;
+
+        _isProcessing = true;
+        _statusMessage = string.Empty;
+        StateHasChanged();
+
+        try
+        {
+            // 确保输出目录存在
+            FileService.EnsureDirectoryExists(GetOutputPath());
+
+            _currentTask = await TaskService.CreateTaskAsync(
+                _inputPath,
+                GetOutputPath(),
+                _selectedTemplate.Id);
+
+            _ = Task.Run(async () =>
+            {
+                await TaskService.StartTaskAsync(_currentTask.Id);
+            });
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"创建任务失败: {ex.Message}";
+            _statusClass = "error";
+            _isProcessing = false;
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task CancelConversion()
+    {
+        if (_currentTask != null)
+        {
+            await TaskService.CancelTaskAsync(_currentTask.Id);
+        }
+    }
+
+    private void OnProgressChanged(object? sender, TaskProgressEventArgs e)
+    {
+        if (_currentTask?.Id == e.TaskId)
+        {
+            _currentTask.Progress = e.Progress;
+            _currentTask.ProcessingSpeed = e.Speed;
+            _currentTask.EstimatedTimeRemaining = e.Eta;
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async void OnStatusChanged(object? sender, TaskStatusEventArgs e)
+    {
+        if (_currentTask?.Id == e.TaskId)
+        {
+            _currentTask.Status = e.NewStatus;
+
+            switch (e.NewStatus)
+            {
+                case Models.TaskStatus.Completed:
+                    _statusMessage = "✅ 转换完成！";
+                    _statusClass = "success";
+                    _isProcessing = false;
+                    break;
+                case Models.TaskStatus.Failed:
+                    _statusMessage = $"❌ 转换失败: {e.ErrorMessage}";
+                    _statusClass = "error";
+                    _isProcessing = false;
+                    break;
+                case Models.TaskStatus.Cancelled:
+                    _statusMessage = "⚠️ 转换已取消";
+                    _statusClass = "warning";
+                    _isProcessing = false;
+                    break;
+            }
+
+            await LoadRecentTasks();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private static string FormatTime(double seconds)
+    {
+        var ts = TimeSpan.FromSeconds(seconds);
+        return ts.Hours > 0 
+            ? $"{ts.Hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}"
+            : $"{ts.Minutes:D2}:{ts.Seconds:D2}";
+    }
+
+    private static string GetStatusClass(Models.TaskStatus status) => status switch
+    {
+        Models.TaskStatus.Completed => "completed",
+        Models.TaskStatus.Failed => "failed",
+        Models.TaskStatus.Running => "running",
+        Models.TaskStatus.Cancelled => "cancelled",
+        _ => "pending"
+    };
+
+    private static string GetStatusText(Models.TaskStatus status) => status switch
+    {
+        Models.TaskStatus.Completed => "完成",
+        Models.TaskStatus.Failed => "失败",
+        Models.TaskStatus.Running => "运行中",
+        Models.TaskStatus.Cancelled => "已取消",
+        _ => "等待"
+    };
+
+    public void Dispose()
+    {
+        TaskService.TaskProgressChanged -= OnProgressChanged;
+        TaskService.TaskStatusChanged -= OnStatusChanged;
+    }
+}
+
+<style>
+    .convert-container {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+
+    h1 {
+        margin-bottom: 1.5rem;
+    }
+
+    .convert-layout {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 2rem;
+        margin-bottom: 2rem;
+    }
+
+    .form-section, .template-section {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 8px;
+    }
+
+    .form-section h2 {
+        margin-top: 0;
+        margin-bottom: 1rem;
+        font-size: 1.1rem;
+    }
+
+    .form-group {
+        margin-bottom: 1rem;
+    }
+
+    .form-group label {
+        display: block;
+        font-weight: 500;
+        margin-bottom: 0.5rem;
+    }
+
+    .form-group input {
+        width: 100%;
+        padding: 0.75rem;
+        border: 2px solid #ddd;
+        border-radius: 6px;
+        font-size: 0.95rem;
+    }
+
+    .help-text {
+        display: block;
+        font-size: 0.8rem;
+        color: var(--text-muted, #888);
+        margin-top: 0.25rem;
+    }
+
+    .help-text code {
+        background: var(--light-bg, #e9ecef);
+        padding: 0.1rem 0.3rem;
+        border-radius: 3px;
+        font-size: 0.75rem;
+        color: var(--text-primary, #333);
+    }
+
+    .format-help {
+        margin-top: 0.5rem;
+        font-size: 0.85rem;
+    }
+
+    .format-help summary {
+        cursor: pointer;
+        color: var(--primary-color, #007bff);
+        user-select: none;
+    }
+
+    .format-help summary:hover {
+        text-decoration: underline;
+    }
+
+    .format-list {
+        margin-top: 0.5rem;
+        padding: 0.75rem;
+        background: var(--light-bg, #f8f9fa);
+        border-radius: 4px;
+        border: 1px solid var(--border-color, #ddd);
+    }
+
+    .format-item {
+        margin-bottom: 0.4rem;
+        font-size: 0.8rem;
+        color: var(--text-secondary, #666);
+    }
+
+    .format-item:last-child {
+        margin-bottom: 0;
+    }
+
+    .format-item code {
+        background: var(--card-bg, #e9ecef);
+        padding: 0.1rem 0.3rem;
+        border-radius: 3px;
+        font-size: 0.75rem;
+        color: #d63384;
+    }
+
+    .preview-section {
+        background: #e7f1ff;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1.5rem;
+    }
+
+    .preview-section h3 {
+        margin: 0 0 0.75rem 0;
+        font-size: 1rem;
+    }
+
+    .preview-item {
+        display: flex;
+        margin-bottom: 0.5rem;
+    }
+
+    .preview-item .label {
+        width: 60px;
+        color: #666;
+    }
+
+    .preview-item .value {
+        flex: 1;
+        word-break: break-all;
+    }
+
+    .action-section {
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 2rem;
+    }
+
+    .btn-primary {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 1rem 2rem;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-size: 1rem;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+        background: #0056b3;
+    }
+
+    .btn-primary:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+    }
+
+    .btn-cancel {
+        padding: 1rem 1.5rem;
+        background: #dc3545;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+    }
+
+    .spinner-small {
+        width: 16px;
+        height: 16px;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-top-color: white;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+
+    @@keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .progress-section {
+        margin-bottom: 1.5rem;
+    }
+
+    .log-section {
+        margin-bottom: 1.5rem;
+        height: 300px;
+    }
+
+    .status-message {
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1.5rem;
+    }
+
+    .status-message.success {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .status-message.error {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .status-message.warning {
+        background: #fff3cd;
+        color: #856404;
+    }
+
+    .history-section {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 8px;
+    }
+
+    .history-section h3 {
+        margin: 0 0 1rem 0;
+    }
+
+    .history-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    .history-table th,
+    .history-table td {
+        padding: 0.75rem;
+        text-align: left;
+        border-bottom: 1px solid #ddd;
+    }
+
+    .history-table th {
+        background: #e9ecef;
+        font-weight: 500;
+    }
+
+    .status-badge {
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.8rem;
+    }
+
+    .status-badge.completed { background: #d4edda; color: #155724; }
+    .status-badge.failed { background: #f8d7da; color: #721c24; }
+    .status-badge.running { background: #cce5ff; color: #004085; }
+    .status-badge.cancelled { background: #fff3cd; color: #856404; }
+    .status-badge.pending { background: #e9ecef; color: #666; }
+
+    @@media (max-width: 900px) {
+        .convert-layout {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>

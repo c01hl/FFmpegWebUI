@@ -1,0 +1,392 @@
+@page "/settings"
+@using FFmpegWebUI.Models
+@using FFmpegWebUI.Services
+@using FFmpegWebUI.Components.Shared
+@inject ISettingsService SettingsService
+@inject IFFmpegService FFmpegService
+@inject NavigationManager Navigation
+@rendermode InteractiveServer
+
+<PageTitle>设置 - FFmpeg Web UI</PageTitle>
+
+<div class="settings-container">
+    <h1>⚙️ 设置</h1>
+
+    @if (_isLoading)
+    {
+        <div class="loading">加载中...</div>
+    }
+    else
+    {
+        <div class="settings-sections">
+            <section class="settings-section">
+                <h2>📍 FFmpeg 路径</h2>
+                <FileSelector Label="FFmpeg 可执行文件路径"
+                              @bind-Value="_settings.FFmpegPath"
+                              Placeholder="留空则使用系统 PATH 中的 ffmpeg"
+                              ValidateExists="false"
+                              ShowFileInfo="true" />
+                <div class="form-group inline-action">
+                    <button class="btn-test" @onclick="TestFFmpegPath">🔍 测试 FFmpeg</button>
+                    @if (_ffmpegTestResult != null)
+                    {
+                        <span class="test-result @(_ffmpegTestResult.Value ? "success" : "error")">
+                            @(_ffmpegTestResult.Value ? "✓ FFmpeg 可用" : "✗ FFmpeg 不可用")
+                        </span>
+                    }
+                </div>
+                <span class="help-text">
+                    例如：C:\ffmpeg\bin\ffmpeg.exe 或 /usr/local/bin/ffmpeg
+                </span>
+
+                <FileSelector Label="ffprobe 可执行文件路径"
+                              @bind-Value="_settings.FFprobePath"
+                              Placeholder="留空则使用系统 PATH 中的 ffprobe"
+                              ValidateExists="false"
+                              ShowFileInfo="true" />
+            </section>
+
+            <section class="settings-section">
+                <h2>📁 输出设置</h2>
+                <FileSelector Label="默认输出目录"
+                              @bind-Value="_settings.DefaultOutputDirectory"
+                              Placeholder="选择默认输出目录"
+                              IsDirectory="true"
+                              ValidateExists="false" />
+
+                <div class="form-group">
+                    <label>输出文件命名规则</label>
+                    <select @bind="_settings.OutputNaming">
+                        <option value="@OutputNamingRule.Original">保持原名</option>
+                        <option value="@OutputNamingRule.Suffix">添加后缀</option>
+                    </select>
+                </div>
+
+                @if (_settings.OutputNaming == OutputNamingRule.Suffix)
+                {
+                    <div class="form-group">
+                        <label>输出文件后缀</label>
+                        <input type="text" @bind="_settings.OutputSuffix"
+                               placeholder="_converted" />
+                        <span class="help-text">
+                            示例：原文件 video.mp4 → video@(_settings.OutputSuffix).mp4
+                        </span>
+                    </div>
+                }
+
+                <div class="form-group">
+                    <label>文件已存在时的处理方式</label>
+                    <select @bind="_settings.FileExistsAction">
+                        <option value="@FileExistsAction.Ask">询问用户</option>
+                        <option value="@FileExistsAction.Overwrite">覆盖</option>
+                        <option value="@FileExistsAction.Skip">跳过</option>
+                        <option value="@FileExistsAction.Rename">重命名</option>
+                    </select>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <h2>🚀 性能设置</h2>
+                <div class="form-group checkbox">
+                    <label>
+                        <input type="checkbox" @bind="_settings.PreferHardwareAcceleration" />
+                        优先使用硬件加速
+                    </label>
+                    <span class="help-text">
+                        启用后将自动选择可用的硬件编码器（NVENC、QSV、AMF）
+                    </span>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <h2>🧹 数据管理</h2>
+                <div class="form-group">
+                    <label>任务历史保留天数</label>
+                    <input type="number" @bind="_settings.TaskHistoryRetentionDays" min="0" max="365" />
+                    <span class="help-text">
+                        设置为 0 表示不自动清理历史记录
+                    </span>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <h2>🎨 界面设置</h2>
+                <div class="form-group">
+                    <label>主题</label>
+                    <select @bind="_settings.Theme">
+                        <option value="System">跟随系统</option>
+                        <option value="Light">浅色</option>
+                        <option value="Dark">深色</option>
+                    </select>
+                </div>
+            </section>
+        </div>
+
+        <div class="action-section">
+            <button class="btn-primary" @onclick="SaveSettings" disabled="@_isSaving">
+                @(_isSaving ? "保存中..." : "💾 保存设置")
+            </button>
+            <button class="btn-secondary" @onclick="ResetSettings">
+                🔄 恢复默认
+            </button>
+        </div>
+
+        @if (!string.IsNullOrEmpty(_message))
+        {
+            <div class="message @_messageClass">@_message</div>
+        }
+    }
+</div>
+
+@code {
+    private AppSettings _settings = new();
+    private string _originalTheme = "System";
+    private bool _isLoading = true;
+    private bool _isSaving;
+    private bool? _ffmpegTestResult;
+    private string _message = string.Empty;
+    private string _messageClass = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadSettings();
+    }
+
+    private async Task LoadSettings()
+    {
+        _isLoading = true;
+        _settings = await SettingsService.GetSettingsAsync();
+        _originalTheme = _settings.Theme;
+        _isLoading = false;
+    }
+
+    private async Task SaveSettings()
+    {
+        _isSaving = true;
+        _message = string.Empty;
+        StateHasChanged();
+
+        try
+        {
+            var themeChanged = _settings.Theme != _originalTheme;
+            await SettingsService.SaveSettingsAsync(_settings);
+            _message = "✓ 设置已保存";
+            _messageClass = "success";
+            
+            // 如果主题改变，刷新页面以应用新主题
+            if (themeChanged)
+            {
+                _message = "✓ 设置已保存，正在应用新主题...";
+                StateHasChanged();
+                await Task.Delay(500);
+                Navigation.NavigateTo(Navigation.Uri, forceLoad: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            _message = $"保存失败: {ex.Message}";
+            _messageClass = "error";
+        }
+        finally
+        {
+            _isSaving = false;
+        }
+    }
+
+    private async Task ResetSettings()
+    {
+        var oldTheme = _settings.Theme;
+        await SettingsService.ResetToDefaultAsync();
+        await LoadSettings();
+        _message = "✓ 已恢复默认设置";
+        _messageClass = "success";
+        
+        // 如果主题改变，刷新页面
+        if (_settings.Theme != oldTheme)
+        {
+            _message = "✓ 已恢复默认设置，正在应用主题...";
+            StateHasChanged();
+            await Task.Delay(500);
+            Navigation.NavigateTo(Navigation.Uri, forceLoad: true);
+        }
+    }
+
+    private async Task TestFFmpegPath()
+    {
+        _ffmpegTestResult = null;
+        StateHasChanged();
+
+        _ffmpegTestResult = await SettingsService.ValidateFFmpegPathAsync(_settings.FFmpegPath);
+        StateHasChanged();
+    }
+}
+
+<style>
+    .settings-container {
+        max-width: 800px;
+        margin: 0 auto;
+    }
+
+    h1 {
+        margin-bottom: 2rem;
+    }
+
+    .loading {
+        text-align: center;
+        padding: 3rem;
+        color: #666;
+    }
+
+    .settings-sections {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+        margin-bottom: 2rem;
+    }
+
+    .settings-section {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 8px;
+    }
+
+    .settings-section h2 {
+        margin: 0 0 1rem 0;
+        font-size: 1.1rem;
+        color: #333;
+    }
+
+    .form-group {
+        margin-bottom: 1rem;
+    }
+
+    .form-group:last-child {
+        margin-bottom: 0;
+    }
+
+    .form-group label {
+        display: block;
+        font-weight: 500;
+        margin-bottom: 0.5rem;
+        color: #333;
+    }
+
+    .form-group input[type="text"],
+    .form-group input[type="number"],
+    .form-group select {
+        width: 100%;
+        padding: 0.6rem;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 0.95rem;
+    }
+
+    .form-group.checkbox label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        cursor: pointer;
+        font-weight: normal;
+    }
+
+    .form-group.checkbox input {
+        width: auto;
+    }
+
+    .form-group.inline-action {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        margin-top: -0.5rem;
+        margin-bottom: 1rem;
+    }
+
+    .btn-test {
+        padding: 0.5rem 1rem;
+        background: #17a2b8;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        white-space: nowrap;
+    }
+
+    .btn-test:hover {
+        background: #138496;
+    }
+
+    .test-result {
+        font-size: 0.9rem;
+        font-weight: 500;
+    }
+
+    .test-result.success {
+        color: #28a745;
+    }
+
+    .test-result.error {
+        color: #dc3545;
+    }
+
+    .help-text {
+        display: block;
+        font-size: 0.8rem;
+        color: #888;
+        margin-top: 0.25rem;
+    }
+
+    .action-section {
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .btn-primary,
+    .btn-secondary {
+        padding: 0.75rem 1.5rem;
+        border-radius: 6px;
+        font-size: 0.95rem;
+        cursor: pointer;
+    }
+
+    .btn-primary {
+        background: #007bff;
+        color: white;
+        border: none;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+        background: #0056b3;
+    }
+
+    .btn-primary:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+    }
+
+    .btn-secondary {
+        background: #6c757d;
+        color: white;
+        border: none;
+    }
+
+    .btn-secondary:hover {
+        background: #5a6268;
+    }
+
+    .message {
+        padding: 1rem;
+        border-radius: 6px;
+    }
+
+    .message.success {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .message.error {
+        background: #f8d7da;
+        color: #721c24;
+    }
+</style>

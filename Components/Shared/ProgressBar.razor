@@ -1,0 +1,206 @@
+@using FFmpegWebUI.Models
+@using TaskStatus = FFmpegWebUI.Models.TaskStatus
+
+<div class="progress-component">
+    <div class="progress-header">
+        <span class="progress-label">@Label</span>
+        <span class="progress-percentage">@Progress.ToString("F1")%</span>
+    </div>
+
+    <div class="progress-track">
+        <div class="progress-fill @GetProgressClass()" style="width: @Progress%"></div>
+    </div>
+
+    <div class="progress-stats">
+        @if (Speed.HasValue)
+        {
+            <span class="stat-item">
+                <span class="stat-label">速度</span>
+                <span class="stat-value">@Speed.Value.ToString("F2")x</span>
+            </span>
+        }
+
+        @if (Eta.HasValue && Eta.Value > 0)
+        {
+            <span class="stat-item">
+                <span class="stat-label">剩余时间</span>
+                <span class="stat-value">@FormatTime(Eta.Value)</span>
+            </span>
+        }
+
+        @if (CurrentTime > 0 && TotalDuration > 0)
+        {
+            <span class="stat-item">
+                <span class="stat-label">进度</span>
+                <span class="stat-value">@FormatTime(CurrentTime) / @FormatTime(TotalDuration)</span>
+            </span>
+        }
+
+        @if (Status != null)
+        {
+            <span class="stat-item status">
+                <span class="status-badge @GetStatusClass()">@GetStatusText()</span>
+            </span>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public string Label { get; set; } = "转换进度";
+
+    [Parameter]
+    public double Progress { get; set; }
+
+    [Parameter]
+    public double? Speed { get; set; }
+
+    [Parameter]
+    public double? Eta { get; set; }
+
+    [Parameter]
+    public double CurrentTime { get; set; }
+
+    [Parameter]
+    public double TotalDuration { get; set; }
+
+    [Parameter]
+    public TaskStatus? Status { get; set; }
+
+    private string GetProgressClass()
+    {
+        if (Status == TaskStatus.Failed) return "failed";
+        if (Status == TaskStatus.Cancelled) return "cancelled";
+        if (Status == TaskStatus.Completed) return "completed";
+        if (Progress >= 100) return "completed";
+        return "running";
+    }
+
+    private string GetStatusClass() => Status switch
+    {
+        TaskStatus.Completed => "completed",
+        TaskStatus.Failed => "failed",
+        TaskStatus.Running => "running",
+        TaskStatus.Cancelled => "cancelled",
+        _ => "pending"
+    };
+
+    private string GetStatusText() => Status switch
+    {
+        TaskStatus.Completed => "已完成",
+        TaskStatus.Failed => "失败",
+        TaskStatus.Running => "运行中",
+        TaskStatus.Cancelled => "已取消",
+        TaskStatus.Pending => "等待中",
+        _ => "未知"
+    };
+
+    private static string FormatTime(double seconds)
+    {
+        var ts = TimeSpan.FromSeconds(seconds);
+        return ts.Hours > 0
+            ? $"{ts.Hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}"
+            : $"{ts.Minutes:D2}:{ts.Seconds:D2}";
+    }
+}
+
+<style>
+    .progress-component {
+        background: #f8f9fa;
+        border-radius: 8px;
+        padding: 1rem;
+    }
+
+    .progress-header {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 0.5rem;
+    }
+
+    .progress-label {
+        font-weight: 500;
+        color: #333;
+    }
+
+    .progress-percentage {
+        font-weight: 600;
+        color: #007bff;
+    }
+
+    .progress-track {
+        height: 12px;
+        background: #e9ecef;
+        border-radius: 6px;
+        overflow: hidden;
+        margin-bottom: 0.75rem;
+    }
+
+    .progress-fill {
+        height: 100%;
+        transition: width 0.3s ease;
+        border-radius: 6px;
+    }
+
+    .progress-fill.running {
+        background: linear-gradient(90deg, #007bff, #00c853);
+        animation: shimmer 2s infinite;
+    }
+
+    .progress-fill.completed {
+        background: #28a745;
+    }
+
+    .progress-fill.failed {
+        background: #dc3545;
+    }
+
+    .progress-fill.cancelled {
+        background: #ffc107;
+    }
+
+    @@keyframes shimmer {
+        0% { background-position: -200% 0; }
+        100% { background-position: 200% 0; }
+    }
+
+    .progress-stats {
+        display: flex;
+        gap: 1.5rem;
+        flex-wrap: wrap;
+    }
+
+    .stat-item {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+    }
+
+    .stat-label {
+        font-size: 0.75rem;
+        color: #888;
+        text-transform: uppercase;
+    }
+
+    .stat-value {
+        font-size: 0.95rem;
+        font-weight: 500;
+        color: #333;
+    }
+
+    .stat-item.status {
+        margin-left: auto;
+    }
+
+    .status-badge {
+        padding: 0.25rem 0.75rem;
+        border-radius: 4px;
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+
+    .status-badge.completed { background: #d4edda; color: #155724; }
+    .status-badge.failed { background: #f8d7da; color: #721c24; }
+    .status-badge.running { background: #cce5ff; color: #004085; }
+    .status-badge.cancelled { background: #fff3cd; color: #856404; }
+    .status-badge.pending { background: #e9ecef; color: #666; }
+</style>

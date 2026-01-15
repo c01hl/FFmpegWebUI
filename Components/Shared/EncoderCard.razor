@@ -1,0 +1,145 @@
+@using FFmpegWebUI.Models
+
+<div class="encoder-card @(Encoder.IsAvailable ? "available" : "unavailable")">
+    <div class="encoder-header">
+        <span class="encoder-icon">@GetEncoderIcon()</span>
+        <span class="encoder-name">@Encoder.DisplayName</span>
+    </div>
+    <div class="encoder-details">
+        <span class="encoder-type">@GetEncoderTypeLabel()</span>
+        <span class="encoder-status">
+            @if (Encoder.IsAvailable)
+            {
+                <span class="status-badge available">✓ 可用</span>
+            }
+            else
+            {
+                <span class="status-badge unavailable">✗ 不可用</span>
+            }
+        </span>
+    </div>
+    @if (!Encoder.IsAvailable && !string.IsNullOrEmpty(Encoder.UnavailableReason))
+    {
+        <div class="encoder-reason">@Encoder.UnavailableReason</div>
+    }
+    @if (Encoder.SupportedCodecs.Count > 0)
+    {
+        <div class="encoder-codecs">
+            @foreach (var codec in Encoder.SupportedCodecs)
+            {
+                <span class="codec-tag">@codec</span>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public HardwareEncoder Encoder { get; set; } = default!;
+
+    private string GetEncoderIcon() => Encoder.Type switch
+    {
+        EncoderType.Nvenc => "🟢",
+        EncoderType.Qsv => "🔵",
+        EncoderType.Amf => "🔴",
+        EncoderType.VideoToolbox => "⚪",
+        EncoderType.Software => "💻",
+        _ => "❓"
+    };
+
+    private string GetEncoderTypeLabel() => Encoder.Type switch
+    {
+        EncoderType.Nvenc => "NVIDIA",
+        EncoderType.Qsv => "Intel",
+        EncoderType.Amf => "AMD",
+        EncoderType.VideoToolbox => "Apple",
+        EncoderType.Software => "CPU",
+        _ => "未知"
+    };
+}
+
+<style>
+    .encoder-card {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 0.5rem;
+        min-width: 250px;
+        background: white;
+        transition: box-shadow 0.2s;
+    }
+
+    .encoder-card:hover {
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    .encoder-card.unavailable {
+        opacity: 0.6;
+        background: #f9f9f9;
+    }
+
+    .encoder-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .encoder-icon {
+        font-size: 1.2rem;
+    }
+
+    .encoder-name {
+        font-weight: 600;
+        font-size: 0.95rem;
+    }
+
+    .encoder-details {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.85rem;
+        color: #666;
+    }
+
+    .status-badge {
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 500;
+    }
+
+    .status-badge.available {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .status-badge.unavailable {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .encoder-reason {
+        font-size: 0.8rem;
+        color: #856404;
+        background: #fff3cd;
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+        margin-top: 0.5rem;
+    }
+
+    .encoder-codecs {
+        margin-top: 0.5rem;
+        display: flex;
+        gap: 0.25rem;
+        flex-wrap: wrap;
+    }
+
+    .codec-tag {
+        background: #e9ecef;
+        padding: 0.1rem 0.4rem;
+        border-radius: 3px;
+        font-size: 0.75rem;
+        color: #495057;
+    }
+</style>
