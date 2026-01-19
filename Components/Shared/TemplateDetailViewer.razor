@@ -44,12 +44,21 @@
 
                 <div class="detail-section">
                     <div class="detail-row full">
-                        <span class="label">FFmpeg 命令参数</span>
+                        <div class="command-header">
+                            <span class="label">FFmpeg 命令参数</span>
+                            <button class="copy-btn-header @(_copied ? "copied" : "")" @onclick="CopyCommand" title="复制命令">
+                                @if (_copied)
+                                {
+                                    <span>✓ 已复制</span>
+                                }
+                                else
+                                {
+                                    <span>📋 复制</span>
+                                }
+                            </button>
+                        </div>
                         <div class="command-box">
                             <code>@_template.CommandArgs</code>
-                            <button class="copy-btn" @onclick="CopyCommand" title="复制命令">
-                                @(_copied ? "✓ 已复制" : "📋 复制")
-                            </button>
                         </div>
                     </div>
                 </div>
@@ -305,9 +314,36 @@
         font-style: italic;
     }
 
+    .command-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.5rem;
+    }
+
+    .copy-btn-header {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.4rem 0.75rem;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .copy-btn-header:hover {
+        background: #0056b3;
+    }
+
+    .copy-btn-header.copied {
+        background: #28a745;
+    }
+
     .command-box {
-        margin-top: 0.5rem;
-        position: relative;
     }
 
     .command-box code {
@@ -322,23 +358,6 @@
         word-break: break-all;
         white-space: pre-wrap;
         color: var(--text-primary, #333);
-    }
-
-    .copy-btn {
-        position: absolute;
-        top: 0.5rem;
-        right: 0.5rem;
-        padding: 0.3rem 0.6rem;
-        background: var(--card-bg, white);
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 4px;
-        font-size: 0.8rem;
-        cursor: pointer;
-        color: var(--text-primary, #333);
-    }
-
-    .copy-btn:hover {
-        background: var(--light-bg, #f0f0f0);
     }
 
     .badge {

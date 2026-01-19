@@ -1,59 +1,126 @@
 @using FFmpegWebUI.Models
 
-<div class="template-card @(IsSelected ? "selected" : "")">
-    <div class="card-header">
-        <span class="card-name">@Template.Name</span>
-        <div class="card-badges">
+@if (ViewMode == "list")
+{
+    <div class="template-card-list @(IsSelected ? "selected" : "")">
+        <div class="list-main">
+            <div class="list-header">
+                <span class="card-name">@Template.Name</span>
+                <div class="card-badges">
+                    @if (Template.Type == TemplateType.System)
+                    {
+                        <span class="badge system">预设</span>
+                    }
+                    else
+                    {
+                        <span class="badge user">自定义</span>
+                    }
+                    @if (Template.RequiresHardwareAcceleration)
+                    {
+                        <span class="badge hw">🚀</span>
+                    }
+                </div>
+            </div>
+            <p class="card-desc">@Template.Description</p>
+            <div class="list-command">
+                <div class="command-header-row">
+                    <span class="command-label">FFmpeg 命令参数:</span>
+                    <button class="copy-btn-small @(_copied ? "copied" : "")" @onclick="CopyCommand" @onclick:stopPropagation="true" title="复制命令">
+                        @(_copied ? "✓" : "📋")
+                    </button>
+                </div>
+                <code class="command-code">@Template.CommandArgs</code>
+            </div>
+            <div class="card-meta">
+                <span>📁 .@Template.OutputExtension</span>
+                <span>📂 @Template.Category</span>
+            </div>
+        </div>
+        <div class="list-actions">
+            <button class="btn-icon" title="查看详情" @onclick="OnViewClick">
+                🔍
+            </button>
             @if (Template.Type == TemplateType.System)
             {
-                <span class="badge system">预设</span>
+                <button class="btn-icon copy" title="复制模板" @onclick="OnCopyClick">
+                    📋
+                </button>
             }
             else
             {
-                <span class="badge user">自定义</span>
+                <button class="btn-icon" title="编辑" @onclick="OnEditClick">
+                    ✏️
+                </button>
+                <button class="btn-icon delete" title="删除" @onclick="OnDeleteClick">
+                    🗑️
+                </button>
             }
-            @if (Template.RequiresHardwareAcceleration)
-            {
-                <span class="badge hw">🚀</span>
-            }
+            <button class="btn-use" @onclick="OnSelectClick">
+                选择
+            </button>
         </div>
     </div>
+}
+else
+{
+    <div class="template-card @(IsSelected ? "selected" : "")">
+        <div class="card-header">
+            <span class="card-name">@Template.Name</span>
+            <div class="card-badges">
+                @if (Template.Type == TemplateType.System)
+                {
+                    <span class="badge system">预设</span>
+                }
+                else
+                {
+                    <span class="badge user">自定义</span>
+                }
+                @if (Template.RequiresHardwareAcceleration)
+                {
+                    <span class="badge hw">🚀</span>
+                }
+            </div>
+        </div>
 
-    <p class="card-desc">@Template.Description</p>
+        <p class="card-desc">@Template.Description</p>
 
-    <div class="card-meta">
-        <span>📁 .@Template.OutputExtension</span>
-        <span>📂 @Template.Category</span>
+        <div class="card-meta">
+            <span>📁 .@Template.OutputExtension</span>
+            <span>📂 @Template.Category</span>
+        </div>
+
+        <div class="card-actions">
+            <button class="btn-icon" title="查看详情" @onclick="OnViewClick">
+                🔍
+            </button>
+            @if (Template.Type == TemplateType.System)
+            {
+                <button class="btn-icon copy" title="复制模板" @onclick="OnCopyClick">
+                    📋
+                </button>
+            }
+            else
+            {
+                <button class="btn-icon" title="编辑" @onclick="OnEditClick">
+                    ✏️
+                </button>
+                <button class="btn-icon delete" title="删除" @onclick="OnDeleteClick">
+                    🗑️
+                </button>
+            }
+            <button class="btn-use" @onclick="OnSelectClick">
+                选择
+            </button>
+        </div>
     </div>
-
-    <div class="card-actions">
-        <button class="btn-icon" title="查看详情" @onclick="OnViewClick">
-            🔍
-        </button>
-        @if (Template.Type == TemplateType.System)
-        {
-            <button class="btn-icon copy" title="复制模板" @onclick="OnCopyClick">
-                📋
-            </button>
-        }
-        else
-        {
-            <button class="btn-icon" title="编辑" @onclick="OnEditClick">
-                ✏️
-            </button>
-            <button class="btn-icon delete" title="删除" @onclick="OnDeleteClick">
-                🗑️
-            </button>
-        }
-        <button class="btn-use" @onclick="OnSelectClick">
-            选择
-        </button>
-    </div>
-</div>
+}
 
 @code {
     [Parameter, EditorRequired]
     public CommandTemplate Template { get; set; } = default!;
+
+    [Parameter]
+    public string ViewMode { get; set; } = "grid";
 
     [Parameter]
     public bool IsSelected { get; set; }
@@ -72,6 +139,17 @@
 
     [Parameter]
     public EventCallback<CommandTemplate> OnCopy { get; set; }
+
+    private bool _copied;
+
+    private async Task CopyCommand()
+    {
+        _copied = true;
+        StateHasChanged();
+        await Task.Delay(2000);
+        _copied = false;
+        StateHasChanged();
+    }
 
     private async Task OnSelectClick()
     {
@@ -100,6 +178,7 @@
 }
 
 <style>
+    /* 网格模式卡片样式 */
     .template-card {
         background: var(--card-bg, white);
         border: 1px solid var(--border-color, #ddd);
@@ -116,6 +195,100 @@
     .template-card.selected {
         border-color: #007bff;
         box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.2);
+    }
+
+    /* 列表模式卡片样式 */
+    .template-card-list {
+        background: var(--card-bg, white);
+        border: 1px solid var(--border-color, #ddd);
+        border-radius: 8px;
+        padding: 1rem;
+        display: flex;
+        gap: 1rem;
+        transition: box-shadow 0.2s, border-color 0.2s;
+        color: var(--text-primary, #333);
+    }
+
+    .template-card-list:hover {
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    }
+
+    .template-card-list.selected {
+        border-color: #007bff;
+        box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.2);
+    }
+
+    .list-main {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .list-header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.35rem;
+    }
+
+    .list-command {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        margin: 0.5rem 0;
+        padding: 0.5rem 0.75rem;
+        background: var(--input-bg, #f5f5f5);
+        border-radius: 4px;
+        border: 1px solid var(--border-color, #eee);
+    }
+
+    .command-header-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    .command-label {
+        font-size: 0.75rem;
+        color: var(--text-secondary, #666);
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+
+    .copy-btn-small {
+        padding: 0.15rem 0.4rem;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        font-size: 0.7rem;
+        cursor: pointer;
+        transition: all 0.2s;
+        line-height: 1;
+    }
+
+    .copy-btn-small:hover {
+        background: #0056b3;
+    }
+
+    .copy-btn-small.copied {
+        background: #28a745;
+    }
+
+    .command-code {
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 0.8rem;
+        color: var(--text-primary, #333);
+        word-break: break-all;
+        line-height: 1.4;
+    }
+
+    .list-actions {
+        display: flex;
+        flex-direction: row;
+        gap: 0.35rem;
+        align-items: center;
+        justify-content: flex-end;
+        flex-shrink: 0;
     }
 
     .card-header {

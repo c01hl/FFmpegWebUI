@@ -5,6 +5,7 @@
 @inject ITaskService TaskService
 @inject IFileService FileService
 @inject ISettingsService SettingsService
+@inject IFFmpegService FFmpegService
 @rendermode InteractiveServer
 
 <PageTitle>转换 - FFmpeg Web UI</PageTitle>
@@ -77,6 +78,22 @@
                 <div class="preview-item">
                     <span class="label">模板:</span>
                     <span class="value">@_selectedTemplate.Name</span>
+                </div>
+                <div class="preview-item full-command">
+                    <span class="label">完整命令:</span>
+                    <div class="full-command-container">
+                        <code class="full-command-code">ffmpeg @_completeCommand</code>
+                        <button class="copy-command-btn @(_commandCopied ? "copied" : "")" @onclick="CopyFullCommand" title="复制命令">
+                            @if (_commandCopied)
+                            {
+                                <text>✓ 已复制</text>
+                            }
+                            else
+                            {
+                                <text>📋 复制</text>
+                            }
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -168,11 +185,19 @@
     private string _outputDirectory = string.Empty;
     private string _outputFileName = string.Empty;
     private CommandTemplate? _selectedTemplate;
+
+    private string _lastInputPath = string.Empty;
+    private CommandTemplate? _lastSelectedTemplate;
+    private string _lastOutputFileName = string.Empty;
+    private string _lastOutputDirectory = string.Empty;
+
     private ConversionTask? _currentTask;
     private List<ConversionTask> _recentTasks = [];
     private bool _isProcessing;
     private string _statusMessage = string.Empty;
     private string _statusClass = string.Empty;
+    private string _completeCommand = string.Empty;
+    private bool _commandCopied = false;
 
     private bool CanStart => !_isProcessing &&
                              !string.IsNullOrEmpty(_inputPath) &&
@@ -188,10 +213,84 @@
         TaskService.TaskStatusChanged += OnStatusChanged;
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await UpdateCompleteCommand();
+            _lastInputPath = _inputPath;
+            _lastSelectedTemplate = _selectedTemplate;
+            _lastOutputFileName = _outputFileName;
+            _lastOutputDirectory = _outputDirectory;
+        }
+        else
+        {
+            // Check if any relevant values have changed
+            if (_inputPath != _lastInputPath ||
+                _selectedTemplate != _lastSelectedTemplate ||
+                _outputFileName != _lastOutputFileName ||
+                _outputDirectory != _lastOutputDirectory)
+            {
+                await UpdateCompleteCommand();
+                _lastInputPath = _inputPath;
+                _lastSelectedTemplate = _selectedTemplate;
+                _lastOutputFileName = _outputFileName;
+                _lastOutputDirectory = _outputDirectory;
+            }
+        }
+    }
+
+    private async Task UpdateCompleteCommand()
+    {
+        if (_selectedTemplate != null && !string.IsNullOrEmpty(_inputPath))
+        {
+            var outputPath = GetOutputPath();
+            // Only update if both paths are valid
+            if (!string.IsNullOrEmpty(outputPath))
+            {
+                _completeCommand = FFmpegService.BuildCommand(_selectedTemplate, _inputPath, outputPath);
+            }
+            else
+            {
+                _completeCommand = "输出路径未配置";
+            }
+        }
+        else
+        {
+            _completeCommand = string.Empty;
+        }
+        StateHasChanged();
+    }
+
+    private async Task CopyFullCommand()
+    {
+        _commandCopied = true;
+        StateHasChanged();
+
+        // Reset the copied status after 2 seconds
+        await Task.Delay(2000);
+        _commandCopied = false;
+        StateHasChanged();
+    }
+
     private async Task LoadDefaults()
     {
         var settings = await SettingsService.GetSettingsAsync();
         _outputDirectory = settings.DefaultOutputDirectory;
+    }
+
+    private CommandTemplate? _previousTemplate;
+    private string _previousInputPath = string.Empty;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // Check if template or input path has changed
+        if (_selectedTemplate != _previousTemplate || _inputPath != _previousInputPath)
+        {
+            _previousTemplate = _selectedTemplate;
+            _previousInputPath = _inputPath;
+            await UpdateCompleteCommand();
+        }
     }
 
     private async Task LoadRecentTasks()
@@ -462,6 +561,55 @@
     .preview-item .value {
         flex: 1;
         word-break: break-all;
+    }
+
+    .full-command {
+        flex-direction: column;
+    }
+
+    .full-command-container {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.5rem;
+        width: 100%;
+        margin-top: 0.5rem;
+    }
+
+    .full-command-code {
+        flex: 1;
+        background: #f0f0f0;
+        padding: 0.75rem;
+        border-radius: 4px;
+        border: 1px solid #ddd;
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 0.9rem;
+        word-break: break-all;
+        white-space: pre-wrap;
+        line-height: 1.4;
+        margin: 0;
+    }
+
+    .copy-command-btn {
+        padding: 0.4rem 0.6rem;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: background 0.2s;
+    }
+
+    .copy-command-btn:hover {
+        background: #0056b3;
+    }
+
+    .copy-command-btn:active {
+        background: #004085;
+    }
+
+    .copy-command-btn.copied {
+        background: #28a745;
     }
 
     .action-section {

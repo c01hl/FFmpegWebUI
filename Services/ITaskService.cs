@@ -28,6 +28,12 @@ public interface ITaskService
     /// <summary>获取当前运行中的任务</summary>
     Task<ConversionTask?> GetRunningTaskAsync();
 
+    /// <summary>获取所有运行中的任务</summary>
+    Task<List<ConversionTask>> GetRunningTasksAsync();
+
+    /// <summary>向任务发送输入命令（如 'q' 键让 FFmpeg 优雅退出）</summary>
+    Task<bool> SendCommandToTaskAsync(ObjectId taskId, string command);
+
     /// <summary>清理历史任务</summary>
     Task<int> CleanupHistoryAsync(DateTime olderThan);
 

@@ -1,0 +1,814 @@
+@page "/tasks"
+@using FFmpegWebUI.Models
+@using FFmpegWebUI.Services
+@using FFmpegWebUI.Components.Shared
+@using TaskStatus = FFmpegWebUI.Models.TaskStatus
+@using LiteDB
+@inject ITaskService TaskService
+@implements IDisposable
+@rendermode InteractiveServer
+
+<PageTitle>任务列表 - FFmpeg Web UI</PageTitle>
+
+<div class="tasks-container">
+    <div class="tasks-header">
+        <h1>📋 任务列表</h1>
+        <div class="header-actions">
+            <button class="btn-refresh" @onclick="RefreshTasks" disabled="@_isRefreshing">
+                <span class="@(_isRefreshing ? "spinner" : "")">🔄</span> 刷新
+            </button>
+            <select @bind="_statusFilter" @bind:after="RefreshTasks" class="status-filter">
+                <option value="">全部状态</option>
+                <option value="Running">运行中</option>
+                <option value="Pending">等待中</option>
+                <option value="Completed">已完成</option>
+                <option value="Failed">失败</option>
+                <option value="Cancelled">已取消</option>
+            </select>
+        </div>
+    </div>
+
+    @if (_runningTasks.Count > 0)
+    {
+        <div class="section running-section">
+            <h2>🚀 进行中的任务 <span class="count">(@_runningTasks.Count)</span></h2>
+            <div class="task-cards">
+                @foreach (var task in _runningTasks)
+                {
+                    <div class="task-card running">
+                        <div class="task-card-header">
+                            <div class="task-info">
+                                <span class="task-filename" title="@task.InputPath">@Path.GetFileName(task.InputPath)</span>
+                                <span class="task-arrow">➜</span>
+                                <span class="task-output" title="@task.OutputPath">@Path.GetFileName(task.OutputPath)</span>
+                            </div>
+                            <span class="status-badge @GetStatusClass(task.Status)">@GetStatusText(task.Status)</span>
+                        </div>
+
+                        <ProgressBar Label=""
+                                     Progress="task.Progress"
+                                     Speed="task.ProcessingSpeed"
+                                     Eta="task.EstimatedTimeRemaining"
+                                     CurrentTime="task.CurrentTime"
+                                     TotalDuration="task.TotalDuration" />
+
+                        <div class="task-meta">
+                            <span class="meta-item">
+                                <span class="meta-label">开始时间:</span>
+                                <span class="meta-value">@(task.StartedAt?.ToLocalTime().ToString("HH:mm:ss") ?? "-")</span>
+                            </span>
+                            <span class="meta-item">
+                                <span class="meta-label">文件大小:</span>
+                                <span class="meta-value">@FormatFileSize(task.InputFileSize)</span>
+                            </span>
+                        </div>
+
+                        <div class="task-actions">
+                            <button class="btn-action btn-quit" @onclick="() => SendQuitCommand(task.Id)" title="发送 'q' 键让 FFmpeg 优雅退出，保留已转换部分">
+                                ⏏️ 优雅退出 (q)
+                            </button>
+                            <button class="btn-action btn-cancel" @onclick="() => CancelTask(task.Id)" title="强制终止进程">
+                                ❌ 强制取消
+                            </button>
+                        </div>
+
+                        @if (_expandedTaskId == task.Id && !string.IsNullOrEmpty(task.LogOutput))
+                        {
+                            <div class="task-log">
+                                <LogViewer LogText="@task.LogOutput" />
+                            </div>
+                        }
+
+                        <button class="btn-expand" @onclick="() => ToggleExpand(task.Id)">
+                            @(_expandedTaskId == task.Id ? "▲ 收起日志" : "▼ 查看日志")
+                        </button>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+
+    @if (_pendingTasks.Count > 0)
+    {
+        <div class="section pending-section">
+            <h2>⏳ 等待中的任务 <span class="count">(@_pendingTasks.Count)</span></h2>
+            <div class="task-list">
+                @foreach (var task in _pendingTasks)
+                {
+                    <div class="task-item pending">
+                        <div class="task-item-info">
+                            <span class="task-filename" title="@task.InputPath">@Path.GetFileName(task.InputPath)</span>
+                            <span class="task-time">创建于 @task.CreatedAt.ToLocalTime().ToString("MM-dd HH:mm")</span>
+                        </div>
+                        <div class="task-item-actions">
+                            <span class="status-badge pending">等待中</span>
+                            <button class="btn-small btn-cancel-small" @onclick="() => CancelTask(task.Id)">取消</button>
+                        </div>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+
+    <div class="section history-section">
+        <h2>📜 历史记录</h2>
+        @if (_historyTasks.Count == 0)
+        {
+            <div class="empty-state">暂无任务记录</div>
+        }
+        else
+        {
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>输入文件</th>
+                        <th>输出文件</th>
+                        <th>状态</th>
+                        <th>耗时</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var task in _historyTasks)
+                    {
+                        <tr class="@GetRowClass(task.Status)">
+                            <td title="@task.InputPath">@Path.GetFileName(task.InputPath)</td>
+                            <td title="@task.OutputPath">@Path.GetFileName(task.OutputPath)</td>
+                            <td>
+                                <span class="status-badge @GetStatusClass(task.Status)">
+                                    @GetStatusText(task.Status)
+                                </span>
+                            </td>
+                            <td>@GetDuration(task)</td>
+                            <td>@task.CreatedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
+                            <td>
+                                <button class="btn-small" @onclick="() => ToggleExpand(task.Id)">详情</button>
+                            </td>
+                        </tr>
+                        @if (_expandedTaskId == task.Id)
+                        {
+                            <tr class="detail-row">
+                                <td colspan="6">
+                                    <div class="task-detail">
+                                        <div class="detail-grid">
+                                            <div class="detail-item">
+                                                <span class="label">输入路径:</span>
+                                                <span class="value">@task.InputPath</span>
+                                            </div>
+                                            <div class="detail-item">
+                                                <span class="label">输出路径:</span>
+                                                <span class="value">@task.OutputPath</span>
+                                            </div>
+                                            <div class="detail-item">
+                                                <span class="label">输入大小:</span>
+                                                <span class="value">@FormatFileSize(task.InputFileSize)</span>
+                                            </div>
+                                            <div class="detail-item">
+                                                <span class="label">输出大小:</span>
+                                                <span class="value">@(task.OutputFileSize.HasValue ? FormatFileSize(task.OutputFileSize.Value) : "-")</span>
+                                            </div>
+                                            @if (!string.IsNullOrEmpty(task.ErrorMessage))
+                                            {
+                                                <div class="detail-item error">
+                                                    <span class="label">错误信息:</span>
+                                                    <span class="value">@task.ErrorMessage</span>
+                                                </div>
+                                            }
+                                        </div>
+                                        @if (!string.IsNullOrEmpty(task.LogOutput))
+                                        {
+                                            <div class="log-container">
+                                                <LogViewer LogText="@task.LogOutput" />
+                                            </div>
+                                        }
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    private List<ConversionTask> _runningTasks = [];
+    private List<ConversionTask> _pendingTasks = [];
+    private List<ConversionTask> _historyTasks = [];
+    private string _statusFilter = string.Empty;
+    private ObjectId? _expandedTaskId;
+    private bool _isRefreshing;
+    private System.Threading.Timer? _refreshTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        TaskService.TaskProgressChanged += OnProgressChanged;
+        TaskService.TaskStatusChanged += OnStatusChanged;
+
+        await RefreshTasks();
+
+        // 自动刷新运行中的任务，每秒一次
+        _refreshTimer = new System.Threading.Timer(async _ =>
+        {
+            if (_runningTasks.Count > 0)
+            {
+                await RefreshRunningTasks();
+                await InvokeAsync(StateHasChanged);
+            }
+        }, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+    }
+
+    private async Task RefreshTasks()
+    {
+        await InvokeAsync(() =>
+        {
+            _isRefreshing = true;
+            StateHasChanged();
+        });
+
+        try
+        {
+            var allTasks = await TaskService.GetRunningTasksAsync();
+            var runningTasks = allTasks.Where(t => t.Status == TaskStatus.Running).ToList();
+            var pendingTasks = allTasks.Where(t => t.Status == TaskStatus.Pending).ToList();
+
+            TaskStatus? statusFilter = _statusFilter switch
+            {
+                "Running" => TaskStatus.Running,
+                "Pending" => TaskStatus.Pending,
+                "Completed" => TaskStatus.Completed,
+                "Failed" => TaskStatus.Failed,
+                "Cancelled" => TaskStatus.Cancelled,
+                _ => null
+            };
+
+            var historyTasks = await TaskService.GetTaskHistoryAsync(50, statusFilter);
+
+            // 从历史中过滤掉正在运行和等待的任务（避免重复显示）
+            if (string.IsNullOrEmpty(_statusFilter))
+            {
+                var runningIds = runningTasks.Select(t => t.Id).ToHashSet();
+                var pendingIds = pendingTasks.Select(t => t.Id).ToHashSet();
+                historyTasks = historyTasks.Where(t => !runningIds.Contains(t.Id) && !pendingIds.Contains(t.Id)).ToList();
+            }
+
+            // Update the fields on the UI thread
+            await InvokeAsync(() =>
+            {
+                _runningTasks = runningTasks;
+                _pendingTasks = pendingTasks;
+                _historyTasks = historyTasks;
+                _isRefreshing = false;
+                StateHasChanged();
+            });
+        }
+        catch
+        {
+            // Update the refreshing state even if there's an error
+            await InvokeAsync(() =>
+            {
+                _isRefreshing = false;
+                StateHasChanged();
+            });
+            throw;
+        }
+    }
+
+    private async Task RefreshRunningTasks()
+    {
+        foreach (var task in _runningTasks)
+        {
+            var updated = await TaskService.GetTaskByIdAsync(task.Id);
+            if (updated != null)
+            {
+                task.Progress = updated.Progress;
+                task.ProcessingSpeed = updated.ProcessingSpeed;
+                task.EstimatedTimeRemaining = updated.EstimatedTimeRemaining;
+                task.CurrentTime = updated.CurrentTime;
+                task.LogOutput = updated.LogOutput;
+                task.Status = updated.Status;
+            }
+        }
+    }
+
+    private async Task SendQuitCommand(ObjectId taskId)
+    {
+        var result = await TaskService.SendCommandToTaskAsync(taskId, "q");
+        if (!result)
+        {
+            // 可以添加通知
+        }
+    }
+
+    private async Task CancelTask(ObjectId taskId)
+    {
+        await TaskService.CancelTaskAsync(taskId);
+        await RefreshTasks();
+    }
+
+    private void ToggleExpand(ObjectId taskId)
+    {
+        _expandedTaskId = _expandedTaskId == taskId ? null : taskId;
+    }
+
+    private void OnProgressChanged(object? sender, TaskProgressEventArgs e)
+    {
+        var task = _runningTasks.FirstOrDefault(t => t.Id == e.TaskId);
+        if (task != null)
+        {
+            task.Progress = e.Progress;
+            task.ProcessingSpeed = e.Speed;
+            task.EstimatedTimeRemaining = e.Eta;
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async void OnStatusChanged(object? sender, TaskStatusEventArgs e)
+    {
+        await RefreshTasks();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private static string GetStatusClass(TaskStatus status) => status switch
+    {
+        TaskStatus.Completed => "completed",
+        TaskStatus.Failed => "failed",
+        TaskStatus.Running => "running",
+        TaskStatus.Cancelled => "cancelled",
+        _ => "pending"
+    };
+
+    private static string GetStatusText(TaskStatus status) => status switch
+    {
+        TaskStatus.Completed => "已完成",
+        TaskStatus.Failed => "失败",
+        TaskStatus.Running => "运行中",
+        TaskStatus.Cancelled => "已取消",
+        _ => "等待中"
+    };
+
+    private static string GetRowClass(TaskStatus status) => status switch
+    {
+        TaskStatus.Failed => "row-failed",
+        TaskStatus.Cancelled => "row-cancelled",
+        _ => ""
+    };
+
+    private static string GetDuration(ConversionTask task)
+    {
+        if (!task.StartedAt.HasValue)
+            return "-";
+
+        var endTime = task.CompletedAt ?? DateTime.UtcNow;
+        var duration = endTime - task.StartedAt.Value;
+        return duration.TotalHours >= 1
+            ? $"{(int)duration.TotalHours}:{duration.Minutes:D2}:{duration.Seconds:D2}"
+            : $"{duration.Minutes:D2}:{duration.Seconds:D2}";
+    }
+
+    private static string FormatFileSize(long bytes)
+    {
+        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
+        double len = bytes;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            len /= 1024;
+        }
+        return $"{len:0.##} {sizes[order]}";
+    }
+
+    public void Dispose()
+    {
+        TaskService.TaskProgressChanged -= OnProgressChanged;
+        TaskService.TaskStatusChanged -= OnStatusChanged;
+        _refreshTimer?.Dispose();
+    }
+}
+
+<style>
+    .tasks-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    .tasks-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.5rem;
+        flex-wrap: wrap;
+        gap: 1rem;
+    }
+
+    .tasks-header h1 {
+        margin: 0;
+    }
+
+    .header-actions {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+    }
+
+    .btn-refresh {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: background 0.2s;
+    }
+
+    .btn-refresh:hover:not(:disabled) {
+        background: #0056b3;
+    }
+
+    .btn-refresh:disabled {
+        opacity: 0.7;
+        cursor: not-allowed;
+    }
+
+    .spinner {
+        display: inline-block;
+        animation: spin 1s linear infinite;
+    }
+
+    @@keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+
+    .status-filter {
+        padding: 0.5rem 1rem;
+        border: 2px solid #ddd;
+        border-radius: 6px;
+        font-size: 0.9rem;
+        background: white;
+    }
+
+    .section {
+        margin-bottom: 2rem;
+    }
+
+    .section h2 {
+        font-size: 1.2rem;
+        margin-bottom: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .count {
+        font-size: 0.9rem;
+        color: #666;
+        font-weight: normal;
+    }
+
+    /* 运行中的任务卡片 */
+    .task-cards {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .task-card {
+        background: #fff;
+        border: 2px solid #e9ecef;
+        border-radius: 12px;
+        padding: 1.25rem;
+        transition: box-shadow 0.2s;
+    }
+
+    .task-card.running {
+        border-color: #007bff;
+        box-shadow: 0 4px 12px rgba(0, 123, 255, 0.15);
+    }
+
+    .task-card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 1rem;
+        gap: 1rem;
+    }
+
+    .task-info {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        font-size: 0.95rem;
+    }
+
+    .task-filename {
+        font-weight: 600;
+        color: #333;
+        max-width: 300px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .task-arrow {
+        color: #888;
+    }
+
+    .task-output {
+        color: #666;
+        max-width: 300px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .task-meta {
+        display: flex;
+        gap: 2rem;
+        margin: 1rem 0;
+        flex-wrap: wrap;
+    }
+
+    .meta-item {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .meta-label {
+        color: #888;
+        font-size: 0.85rem;
+    }
+
+    .meta-value {
+        font-weight: 500;
+        font-size: 0.85rem;
+    }
+
+    .task-actions {
+        display: flex;
+        gap: 0.75rem;
+        margin-top: 1rem;
+        flex-wrap: wrap;
+    }
+
+    .btn-action {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.6rem 1rem;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.85rem;
+        transition: all 0.2s;
+    }
+
+    .btn-quit {
+        background: #ffc107;
+        color: #333;
+    }
+
+    .btn-quit:hover {
+        background: #e0a800;
+    }
+
+    .btn-cancel {
+        background: #dc3545;
+        color: white;
+    }
+
+    .btn-cancel:hover {
+        background: #c82333;
+    }
+
+    .btn-expand {
+        width: 100%;
+        padding: 0.5rem;
+        margin-top: 0.75rem;
+        background: transparent;
+        border: 1px dashed #ddd;
+        border-radius: 4px;
+        color: #666;
+        cursor: pointer;
+        font-size: 0.85rem;
+        transition: all 0.2s;
+    }
+
+    .btn-expand:hover {
+        background: #f8f9fa;
+        border-color: #aaa;
+    }
+
+    .task-log {
+        margin-top: 1rem;
+        max-height: 300px;
+        overflow: auto;
+    }
+
+    /* 等待中的任务列表 */
+    .task-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .task-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem 1rem;
+        background: #f8f9fa;
+        border-radius: 8px;
+        border: 1px solid #e9ecef;
+    }
+
+    .task-item-info {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .task-time {
+        font-size: 0.8rem;
+        color: #888;
+    }
+
+    .task-item-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+
+    .btn-small {
+        padding: 0.35rem 0.75rem;
+        font-size: 0.8rem;
+        border: 1px solid #ddd;
+        background: white;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .btn-small:hover {
+        background: #f8f9fa;
+        border-color: #aaa;
+    }
+
+    .btn-cancel-small {
+        color: #dc3545;
+        border-color: #dc3545;
+    }
+
+    .btn-cancel-small:hover {
+        background: #dc3545;
+        color: white;
+    }
+
+    /* 状态徽章 */
+    .status-badge {
+        padding: 0.25rem 0.75rem;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .status-badge.completed { background: #d4edda; color: #155724; }
+    .status-badge.failed { background: #f8d7da; color: #721c24; }
+    .status-badge.running { background: #cce5ff; color: #004085; }
+    .status-badge.cancelled { background: #fff3cd; color: #856404; }
+    .status-badge.pending { background: #e9ecef; color: #666; }
+
+    /* 历史记录表格 */
+    .history-table {
+        width: 100%;
+        border-collapse: collapse;
+        background: white;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .history-table th,
+    .history-table td {
+        padding: 0.85rem 1rem;
+        text-align: left;
+        border-bottom: 1px solid #e9ecef;
+    }
+
+    .history-table th {
+        background: #f8f9fa;
+        font-weight: 600;
+        font-size: 0.85rem;
+        color: #555;
+    }
+
+    .history-table td {
+        font-size: 0.9rem;
+    }
+
+    .history-table tr:last-child td {
+        border-bottom: none;
+    }
+
+    .history-table tr:hover:not(.detail-row) {
+        background: #f8f9fa;
+    }
+
+    .row-failed {
+        background: #fff5f5;
+    }
+
+    .row-cancelled {
+        background: #fffcf0;
+    }
+
+    .detail-row {
+        background: #f8f9fa;
+    }
+
+    .task-detail {
+        padding: 1rem;
+    }
+
+    .detail-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+    }
+
+    .detail-item {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .detail-item .label {
+        font-size: 0.8rem;
+        color: #888;
+    }
+
+    .detail-item .value {
+        word-break: break-all;
+        font-size: 0.9rem;
+    }
+
+    .detail-item.error .value {
+        color: #dc3545;
+    }
+
+    .log-container {
+        max-height: 300px;
+        overflow: auto;
+        border-radius: 8px;
+    }
+
+    .empty-state {
+        text-align: center;
+        padding: 3rem;
+        color: #888;
+        background: #f8f9fa;
+        border-radius: 8px;
+    }
+
+    @@media (max-width: 768px) {
+        .tasks-header {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .header-actions {
+            justify-content: space-between;
+        }
+
+        .task-card-header {
+            flex-direction: column;
+        }
+
+        .task-info {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .task-arrow {
+            display: none;
+        }
+
+        .history-table {
+            font-size: 0.85rem;
+        }
+
+        .history-table th,
+        .history-table td {
+            padding: 0.6rem 0.5rem;
+        }
+    }
+</style>

@@ -44,6 +44,17 @@
                 <input type="checkbox" @bind="_showUser" /> 显示自定义
             </label>
         </div>
+
+        <div class="view-toggle">
+            <button class="view-btn @(_viewMode == "grid" ? "active" : "")"
+                    @onclick='() => _viewMode = "grid"' title="网格视图">
+                ▦
+            </button>
+            <button class="view-btn @(_viewMode == "list" ? "active" : "")"
+                    @onclick='() => _viewMode = "list"' title="列表视图">
+                ☰
+            </button>
+        </div>
     </div>
 
     @if (_isLoading)
@@ -59,10 +70,11 @@
     }
     else
     {
-        <div class="templates-grid">
+        <div class="@(_viewMode == "list" ? "templates-list" : "templates-grid")">
             @foreach (var template in _filteredTemplates)
             {
                 <TemplateCard Template="template"
+                              ViewMode="@_viewMode"
                               OnSelect="SelectTemplate"
                               OnEdit="EditTemplate"
                               OnDelete="DeleteTemplate"
@@ -106,6 +118,7 @@
     private bool _isLoading = true;
     private string _message = string.Empty;
     private string _messageClass = string.Empty;
+    private string _viewMode = "grid";
     private TemplateEditor? _editor;
     private TemplateDetailViewer? _detailViewer;
     private bool _showDeleteConfirm;
@@ -337,10 +350,52 @@
         color: #666;
     }
 
+    .view-toggle {
+        display: flex;
+        gap: 0.25rem;
+        margin-left: auto;
+    }
+
+    .view-btn {
+        padding: 0.4rem 0.6rem;
+        border: 1px solid var(--border-color, #ddd);
+        background: var(--card-bg, white);
+        color: var(--text-secondary, #666);
+        cursor: pointer;
+        font-size: 1rem;
+        line-height: 1;
+        transition: all 0.2s;
+    }
+
+    .view-btn:first-child {
+        border-radius: 4px 0 0 4px;
+    }
+
+    .view-btn:last-child {
+        border-radius: 0 4px 4px 0;
+        border-left: none;
+    }
+
+    .view-btn:hover {
+        background: var(--light-bg, #e9ecef);
+    }
+
+    .view-btn.active {
+        background: #007bff;
+        color: white;
+        border-color: #007bff;
+    }
+
     .templates-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
         gap: 1rem;
+    }
+
+    .templates-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
     }
 
     .message {

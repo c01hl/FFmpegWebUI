@@ -102,7 +102,7 @@ public partial class FFmpegService(ISettingsService settingsService) : IFFmpegSe
         var settings = await settingsService.GetSettingsAsync();
         var ffmpegPath = string.IsNullOrEmpty(settings.FFmpegPath) ? "ffmpeg" : settings.FFmpegPath;
 
-        using var process = CreateProcess(ffmpegPath, task.ActualCommand);
+        using var process = CreateProcess(ffmpegPath, task.ActualCommand, redirectInput: true);
         process.ErrorDataReceived += (_, e) =>
         {
             if (string.IsNullOrEmpty(e.Data)) return;
@@ -123,7 +123,8 @@ public partial class FFmpegService(ISettingsService settingsService) : IFFmpegSe
 
             await process.WaitForExitAsync(cancellationToken);
 
-            if (process.ExitCode != 0)
+            // 通过 'q' 键退出的 FFmpeg 返回码可能是 255
+            if (process.ExitCode != 0 && process.ExitCode != 255)
             {
                 throw new InvalidOperationException($"FFmpeg exited with code {process.ExitCode}");
             }
@@ -150,6 +151,31 @@ public partial class FFmpegService(ISettingsService settingsService) : IFFmpegSe
         return Task.CompletedTask;
     }
 
+    public async Task<bool> SendInputAsync(ObjectId taskId, string input)
+    {
+        if (!_runningProcesses.TryGetValue(taskId, out var process))
+            return false;
+
+        try
+        {
+            if (process.HasExited)
+                return false;
+
+            await process.StandardInput.WriteAsync(input);
+            await process.StandardInput.FlushAsync();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public List<ObjectId> GetRunningTaskIds()
+    {
+        return _runningProcesses.Keys.ToList();
+    }
+
     public string BuildCommand(
         CommandTemplate template,
         string inputPath,
@@ -168,15 +194,16 @@ public partial class FFmpegService(ISettingsService settingsService) : IFFmpegSe
             }
         }
 
-        // 设置默认编码器
-        command = command.Replace("{encoder}", "libx264");
+        // 设置编码器 - 优先使用模板指定的编码器，否则使用默认值
+        var encoder = !string.IsNullOrEmpty(template.RequiredEncoder) ? template.RequiredEncoder : "libx264";
+        command = command.Replace("{encoder}", encoder);
         command = command.Replace("{audio_encoder}", "aac");
         command = command.Replace("{crf}", "23");
 
         return command;
     }
 
-    private static Process CreateProcess(string fileName, string arguments)
+    private static Process CreateProcess(string fileName, string arguments, bool redirectInput = false)
     {
         return new Process
         {
@@ -186,6 +213,7 @@ public partial class FFmpegService(ISettingsService settingsService) : IFFmpegSe
                 Arguments = arguments,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                RedirectStandardInput = redirectInput,
                 UseShellExecute = false,
                 CreateNoWindow = true
             }

@@ -215,6 +215,26 @@ public class TaskService(
         return Task.FromResult(task);
     }
 
+    public Task<List<ConversionTask>> GetRunningTasksAsync()
+    {
+        var tasks = db.Tasks
+            .Query()
+            .Where(t => t.Status == TaskStatus.Running || t.Status == TaskStatus.Pending)
+            .OrderByDescending(t => t.CreatedAt)
+            .ToList();
+
+        return Task.FromResult(tasks);
+    }
+
+    public async Task<bool> SendCommandToTaskAsync(ObjectId taskId, string command)
+    {
+        var task = db.Tasks.FindById(taskId);
+        if (task == null || task.Status != TaskStatus.Running)
+            return false;
+
+        return await ffmpegService.SendInputAsync(taskId, command);
+    }
+
     public Task<int> CleanupHistoryAsync(DateTime olderThan)
     {
         var count = db.Tasks.DeleteMany(t => t.CreatedAt < olderThan);

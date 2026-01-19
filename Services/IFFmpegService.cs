@@ -21,6 +21,12 @@ public interface IFFmpegService
     /// <summary>取消正在执行的任务</summary>
     Task CancelTaskAsync(ObjectId taskId);
 
+    /// <summary>向正在执行的任务发送输入（如 'q' 键退出）</summary>
+    Task<bool> SendInputAsync(ObjectId taskId, string input);
+
+    /// <summary>获取所有正在运行的进程的任务ID列表</summary>
+    List<ObjectId> GetRunningTaskIds();
+
     /// <summary>构建 FFmpeg 命令行</summary>
     string BuildCommand(
         CommandTemplate template,
