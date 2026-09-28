@@ -9,7 +9,6 @@
 @inject IAppStatusService AppStatusService
 @inject IToastService Toast
 @inject IJSRuntime JS
-@rendermode InteractiveServer
 @implements IDisposable
 
 <PageTitle>转换 - @AppInfo.Name</PageTitle>
@@ -135,7 +134,12 @@
 
         <section class="ffui-panel">
             <h2 class="ffui-panel-title">2 · 选择转换模板</h2>
-            <TemplateSelector @bind-SelectedTemplate="_selectedTemplate" InputPath="_inputPath" />
+            @* 显式处理选中回调，而不是 @bind：@bind 只是给字段赋值，
+               不会触发 OnParametersSetAsync，导致「选完模板命令预览是空的」
+               「换模板后预览还是上一个模板的命令」。 *@
+            <TemplateSelector SelectedTemplate="_selectedTemplate"
+                              SelectedTemplateChanged="OnTemplateSelectedAsync"
+                              InputPath="_inputPath" />
         </section>
     </div>
 
@@ -209,7 +213,7 @@
                 </div>
             </div>
 
-            @if (_conflictNotice != null)
+            @if (!string.IsNullOrEmpty(_conflictNotice))
             {
                 <div class="ffui-alert ffui-alert-warning" role="status">
                     <span aria-hidden="true">📄</span>
@@ -669,6 +673,7 @@
                     if (preselected != null)
                     {
                         _selectedTemplate = preselected;
+                        await ApplyTemplateChangeAsync();
                         Toast.Success($"已预选模板：{preselected.Name}");
                     }
                     else
@@ -683,28 +688,8 @@
             }
         }
 
-        var templateChanged = _selectedTemplate != null && _validatedTemplateId != _selectedTemplate.Id;
-
-        if (templateChanged)
-        {
-            _validatedTemplateId = _selectedTemplate!.Id;
-            _validationErrors = TemplateService.Validate(_selectedTemplate)
-                .Where(i => i.Severity == TemplateIssueSeverity.Error)
-                .ToList();
-            _parameterValues = TemplateService.CreateDefaultParameterValues(_selectedTemplate);
-            _testResult = null;
-
-            var extension = string.IsNullOrWhiteSpace(_selectedTemplate.OutputExtension)
-                ? "mp4"
-                : _selectedTemplate.OutputExtension.TrimStart('.');
-            _autoOutputHint = BuildAutoNamePreview(extension);
-        }
-        else if (_selectedTemplate == null && _validatedTemplateId != null)
-        {
-            _validatedTemplateId = null;
-            _validationErrors = [];
-            _parameterValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        }
+        // 参数变化（首次渲染、查询参数变更）时同步一次模板派生状态
+        await ApplyTemplateChangeAsync();
 
         if (!string.Equals(_inputPath, _lastProbedPath, StringComparison.Ordinal))
         {
@@ -713,6 +698,49 @@
         }
 
         await RebuildPreviewAsync();
+    }
+
+    /// <summary>用户在选择器里点了某个模板</summary>
+    private async Task OnTemplateSelectedAsync(CommandTemplate template)
+    {
+        _selectedTemplate = template;
+        await ApplyTemplateChangeAsync();
+        await RebuildPreviewAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>
+    /// 模板变了就重算派生状态：校验结果、参数默认值、自动文件名的提示。
+    /// 之前这段逻辑只写在 OnParametersSetAsync 里，而选择模板并不会触发它。
+    /// </summary>
+    private async Task ApplyTemplateChangeAsync()
+    {
+        if (_selectedTemplate is null)
+        {
+            if (_validatedTemplateId is not null)
+            {
+                _validatedTemplateId = null;
+                _validationErrors = [];
+                _parameterValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
+            return;
+        }
+
+        if (_validatedTemplateId == _selectedTemplate.Id) return;
+
+        _validatedTemplateId = _selectedTemplate.Id;
+        _validationErrors = TemplateService.Validate(_selectedTemplate)
+            .Where(i => i.Severity == TemplateIssueSeverity.Error)
+            .ToList();
+        _parameterValues = TemplateService.CreateDefaultParameterValues(_selectedTemplate);
+        _testResult = null;
+
+        var extension = string.IsNullOrWhiteSpace(_selectedTemplate.OutputExtension)
+            ? "mp4"
+            : _selectedTemplate.OutputExtension.TrimStart('.');
+        _autoOutputHint = BuildAutoNamePreview(extension);
+
+        await Task.CompletedTask;
     }
 
     private string BuildAutoNamePreview(string extension)

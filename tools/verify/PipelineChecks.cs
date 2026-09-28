@@ -50,6 +50,61 @@ internal static class PipelineChecks
         Console.WriteLine();
         Console.WriteLine("── 文件对话框路径解析 ────────────────────────────────────");
         CheckFileDialogPaths(ctx);
+
+        Console.WriteLine();
+        Console.WriteLine("── 轻提示（Toast）生命周期 ───────────────────────────────");
+        await CheckToastServiceAsync(ctx);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 轻提示的行为检查。
+    /// 起因：界面上提示的关闭按钮点不动、也等不到它自己消失。
+    /// 关闭按钮点不动是渲染模式问题（布局被留在静态 SSR 里），
+    /// 自动消失则是 ToastService 记录了 DurationMs 却从来没人用它。
+    /// </summary>
+    private static async Task CheckToastServiceAsync(VerifyContext ctx)
+    {
+        IToastService toast = new ToastService();
+
+        // 1) 手动关闭
+        toast.Show("第一条");
+        ctx.Check("Show 之后能取到提示", toast.Messages.Count == 1, toast.Messages.Count.ToString());
+
+        var firstId = toast.Messages[0].Id;
+        toast.Dismiss(firstId);
+        ctx.Check("Dismiss 能移除指定提示", toast.Messages.Count == 0, toast.Messages.Count.ToString());
+
+        // 2) 到点自动消失（这是界面「关不掉也等不走」的另一半原因）
+        toast.Show("会自己消失的提示", ToastLevel.Success, durationMs: 300);
+        ctx.Check("设置了时长的提示会先出现", toast.Messages.Count == 1);
+        await Task.Delay(1200);
+        ctx.Check("到时后自动消失", toast.Messages.Count == 0, toast.Messages.Count.ToString());
+
+        // 3) durationMs <= 0 表示常驻
+        toast.Show("常驻提示", ToastLevel.Warning, durationMs: 0);
+        await Task.Delay(400);
+        ctx.Check("时长为 0 的提示不会自动消失", toast.Messages.Count == 1, toast.Messages.Count.ToString());
+        toast.Clear();
+        ctx.Check("Clear 能清空全部提示", toast.Messages.Count == 0);
+
+        // 4) 数量上限，避免刷屏
+        for (var i = 0; i < 12; i++) toast.Show($"第 {i} 条", durationMs: 0);
+        ctx.Check("提示数量有上限（不会无限堆积）", toast.Messages.Count <= 5, toast.Messages.Count.ToString());
+        ctx.Check("保留的是最新的几条", toast.Messages[^1].Text == "第 11 条", toast.Messages[^1].Text);
+
+        // 5) 空文本不产生提示
+        toast.Clear();
+        toast.Show("   ");
+        ctx.Check("空白文本不会产生提示", toast.Messages.Count == 0);
+
+        // 6) 事件通知（ToastHost 依赖它刷新界面）
+        var raised = 0;
+        toast.Changed += (_, _) => raised++;
+        toast.Show("触发一次", durationMs: 0);
+        toast.Dismiss(toast.Messages[0].Id);
+        ctx.Check("增删都会触发 Changed 事件（界面据此刷新）", raised >= 2, raised.ToString());
     }
 
     // ────────────────────────────────────────────────────────────────

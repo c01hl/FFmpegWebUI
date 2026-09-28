@@ -120,9 +120,7 @@
     {
         try
         {
-            var safe = Uri.EscapeDataString(theme ?? "System");
-            await JS.InvokeVoidAsync("eval",
-                $"document.cookie='ffui-theme={safe};path=/;max-age=31536000;SameSite=Lax'");
+            await JS.InvokeVoidAsync("ffui.setThemeCookie", theme ?? "System");
         }
         catch
         {

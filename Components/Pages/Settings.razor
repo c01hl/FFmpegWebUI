@@ -11,7 +11,6 @@
 @inject ITaskService TaskService
 @inject IToastService Toast
 @inject IJSRuntime JS
-@rendermode InteractiveServer
 
 <PageTitle>设置 - FFmpeg Web UI</PageTitle>
 
@@ -592,7 +591,7 @@
                     <option value="Light">浅色</option>
                     <option value="Dark">深色</option>
                 </select>
-                <span class="field-help">切换后立即在本页生效；点击「保存设置」后才会在下次打开时保持（不需要刷新页面）。</span>
+                <span class="field-help">切换后立即生效并自动记住，下次打开时保持（不需要点「保存设置」，也不需要刷新页面）。</span>
             </div>
 
             <div class="check-field">
@@ -1400,9 +1399,37 @@
 
     // ── 主题 / 通知 ─────────────────────────────────────────────────────
 
+    /// <summary>
+    /// 主题切换：立即生效，并且立即记住。
+    ///
+    /// 主题是显示偏好，用户预期「选了就生效、下次打开还是它」。
+    /// 之前只调用 applyTheme，不写数据库，于是 MainLayout 在下次加载时
+    /// 会用「已保存的设置」把主题和 Cookie 一起覆盖回去 —— 表现就是
+    /// 选了深色、刷新一下又变回浅色。
+    ///
+    /// 这里只单独保存 Theme 字段，不用整份表单去保存，
+    /// 避免把用户尚未保存的其它改动一起写进去。
+    /// </summary>
     private async Task OnThemeChangedAsync()
     {
         await ApplyThemeAsync(_form.Theme);
+
+        try
+        {
+            var stored = await SettingsService.GetSettingsAsync();
+            if (!string.Equals(stored.Theme, _form.Theme, StringComparison.Ordinal))
+            {
+                stored.Theme = _form.Theme;
+                await SettingsService.SaveSettingsAsync(stored);
+            }
+
+            // 同步「已保存」快照，否则会一直显示「有未保存的更改」
+            _original = _original with { Theme = _form.Theme };
+        }
+        catch (Exception ex)
+        {
+            Toast.Warning($"主题已在本页生效，但没能记住（保存设置时会一起写入）：{ex.Message}");
+        }
     }
 
     private async Task ApplyThemeAsync(string theme)
@@ -1412,9 +1439,8 @@
             await JS.InvokeVoidAsync("ffui.applyTheme", theme);
 
             // 与服务端首屏保持一致：把主题写进 Cookie（与 MainLayout 相同的做法）
-            var safe = Uri.EscapeDataString(string.IsNullOrWhiteSpace(theme) ? "System" : theme);
-            await JS.InvokeVoidAsync("eval",
-                $"document.cookie='ffui-theme={safe};path=/;max-age=31536000;SameSite=Lax'");
+            await JS.InvokeVoidAsync("ffui.setThemeCookie",
+                string.IsNullOrWhiteSpace(theme) ? "System" : theme);
         }
         catch (Exception ex)
         {

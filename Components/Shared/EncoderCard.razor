@@ -84,9 +84,19 @@ else
     [Parameter, EditorRequired]
     public HardwareEncoder Encoder { get; set; } = default!;
 
+    /// <summary>
+    /// 编码器支持的编码格式。
+    /// 已经在上面用徽标展示过的那个要去掉，否则同一个值会出现两次
+    /// （例如 h264_videotoolbox 会同时显示 h264 徽标和 h264 标签）。
+    /// </summary>
     private List<string> Codecs => Encoder?.SupportedCodecs is { Count: > 0 } list
-        ? list.Where(c => !string.IsNullOrWhiteSpace(c)).ToList()
-        : new List<string>();
+        ? list
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Where(c => !string.Equals(c, Encoder.Codec, StringComparison.OrdinalIgnoreCase))
+            .Select(c => c.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList()
+        : [];
 
     private string EncoderIcon => Encoder?.Type switch
     {

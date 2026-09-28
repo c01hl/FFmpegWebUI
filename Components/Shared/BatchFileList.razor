@@ -96,7 +96,7 @@
                         <div class="bf-path" title="@file">@Path.GetDirectoryName(file)</div>
                     </div>
 
-                    <span class="bf-size">@SizeOf(file)</span>
+                    <span class="bf-size" title="@SizeOf(file) 字节">@FileService.FormatFileSize(SizeOf(file))</span>
 
                     @if (StatusOf(file) is { } status)
                     {

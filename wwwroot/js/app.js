@@ -17,6 +17,18 @@
         return resolved;
     };
 
+    /* 记住主题，供服务端首屏渲染时直接使用（避免深色系统下闪白）。
+       用独立函数而不是 eval：既更清晰，也不会被 CSP 的 unsafe-eval 限制挡住。 */
+    ffui.setThemeCookie = function (theme) {
+        try {
+            const value = encodeURIComponent(theme || 'System');
+            document.cookie = `ffui-theme=${value};path=/;max-age=31536000;SameSite=Lax`;
+            return true;
+        } catch (e) {
+            return false;
+        }
+    };
+
     ffui.watchSystemTheme = function () {
         if (ffui._themeListener) return;
         const media = window.matchMedia('(prefers-color-scheme: dark)');

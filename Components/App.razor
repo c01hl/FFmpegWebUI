@@ -19,7 +19,9 @@
 </head>
 
 <body>
-    <Routes />
+    @* 渲染模式加在 Routes 上：布局（导航、顶部状态、提示容器）必须和页面处在同一个
+       交互电路里，否则布局里的按钮点了没反应、JS 互操作也会失败。 *@
+    <Routes @rendermode="InteractiveServer" />
     <ReconnectModal />
     <div id="blazor-error-ui" data-nosnippet>
         页面发生了未处理的错误。

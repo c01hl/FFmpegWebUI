@@ -11,19 +11,57 @@
 └──────────────────────────────────────────────────────────┘
 ```
 
-## 截图
+## 界面
+
+> 截图由 [`tools/screenshots/capture.mjs`](tools/screenshots/capture.mjs) 从真实运行的界面生成
+> （Chrome 无头模式 + DevTools Protocol，会先把界面驱动到有内容的状态再截图）。
+> 界面改了以后重新跑一次就能更新，不用手动截图。
+
+### 首页 — 环境状态与本机硬件编码能力
+
+![首页](./readmefiles/index.png)
+
+### 转换 — 实时看到将要执行的命令，以及本机实际会用哪个编码器
+
+输入文件与输出位置：
+
+![转换](./readmefiles/cv.png)
+
+模板参数、解析出的编码器与完整命令预览（可直接复制到终端执行）：
+
+![转换 · 命令预览](./readmefiles/cv-preview.png)
+
+### 模板 — 每个模板都标出在本机是否可用
+
+不可用的模板会被隐藏或标灰并说明原因（例如「需要 NVIDIA NVENC，本机不可用」）：
+
+![模板](./readmefiles/tpl.png)
+
+### 批量处理
+
+所有文件交给后台队列执行，处理期间可以随意切换页面：
+
+![批量处理](./readmefiles/batch.png)
+
+### 任务列表
+
+进度、耗时、输出大小、完整日志，失败可单独或批量重试：
+
+![任务列表](./readmefiles/tasks.png)
+
+### 设置
+
+FFmpeg 路径、硬件加速开关、数据目录、输出命名规则等：
+
+![设置](./readmefiles/setting.png)
+
+### 深色主题
+
+跟随系统 / 浅色 / 深色三档，切换后立即生效并记住：
 
 | 首页 | 转换 |
 | --- | --- |
-| <img src="./readmefiles/index.jpeg" width="420" /> | <img src="./readmefiles/cv.jpeg" width="420" /> |
-
-| 模板 | 批量 |
-| --- | --- |
-| <img src="./readmefiles/tpl.jpeg" width="420" /> | <img src="./readmefiles/batch.jpeg" width="420" /> |
-
-| 设置 |
-| --- |
-| <img src="./readmefiles/setting.jpeg" width="420" /> |
+| ![深色首页](./readmefiles/dark-index.png) | ![深色转换](./readmefiles/dark-convert.png) |
 
 ---
 
@@ -253,7 +291,16 @@ dotnet run --project tools/verify pipeline     # 只检查转换管线
 dotnet run --project tools/verify templates    # 只检查内置模板
 ```
 
-它会：
+另有 `tools/verify/browser-check.mjs`：用 Chrome 无头模式真的点一遍界面（15 项检查）。
+Blazor 的渲染模式和「绑定是否真的触发」这类问题在服务端检查里看不出来
+（HTML 完全正常，只是事件没绑定或没重建），这个脚本会验证：
+提示能否弹出 / 关闭按钮能否真的关掉 / 提示是否自动消失 /
+布局里的 JS 互操作是否可用 / 主题切换后刷新能否保持 /
+选出模板后命令预览是否立刻出现、换模板后是否跟着更新。用法见文件头部注释。
+
+`tools/screenshots/capture.mjs` 则用来重新生成 README 的界面截图。
+
+`tools/verify` 会：
 
 - 用真实 FFmpeg 逐个执行**所有内置模板**，并校验展开后的命令里没有残留占位符、没有空参数；
 - 走一遍完整的转换流程（建任务 → 入队 → 执行 → 进度 → 输出校验），验证四种覆盖策略、取消与半成品清理、中断恢复；
@@ -265,7 +312,7 @@ dotnet run --project tools/verify templates    # 只检查内置模板
   `alias Macintosh HD:Users:…` 这类文件引用而不是路径，这里同时检查转换逻辑，
   以及用 `osacompile` 检查生成的 AppleScript 语法正确（不会弹窗，纯静态校验）。
 
-当前结果（macOS + FFmpeg 9.0.2）：**99 项检查全部通过**。
+当前结果（macOS + FFmpeg 9.0.2）：**109 项检查全部通过**。
 
 - 50 个模板实测可执行；
 - `画面 · 烧录字幕（硬字幕）`因为本机 FFmpeg 未编译 `libass` 而被正确跳过，界面里显示为不可用；

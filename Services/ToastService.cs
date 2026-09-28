@@ -87,15 +87,37 @@ public sealed class ToastService : IToastService
     {
         if (string.IsNullOrWhiteSpace(text)) return;
 
+        var message = new ToastMessage(Guid.NewGuid(), text.Trim(), level, DateTime.UtcNow, durationMs);
+
         lock (_gate)
         {
-            _messages.Add(new ToastMessage(Guid.NewGuid(), text.Trim(), level, DateTime.UtcNow, durationMs));
+            _messages.Add(message);
 
             // 只保留最近若干条，避免刷屏
             while (_messages.Count > MaxVisible) _messages.RemoveAt(0);
         }
 
         Changed?.Invoke(this, EventArgs.Empty);
+
+        // 到点自动消失。
+        // 之前 DurationMs 只是记录在对象上、没人使用，提示会一直堆在屏幕右下角
+        // （虽然上限是 5 条，但用户既关不掉也等不到它自己走）。
+        if (durationMs > 0) ScheduleDismissal(message.Id, durationMs);
+    }
+
+    private void ScheduleDismissal(Guid id, int durationMs)
+    {
+        _ = Task.Delay(durationMs).ContinueWith(_ =>
+        {
+            try
+            {
+                Dismiss(id);
+            }
+            catch
+            {
+                // 定时清理失败不应影响任何调用方
+            }
+        }, TaskScheduler.Default);
     }
 
     public void Success(string text, int durationMs = 4000) => Show(text, ToastLevel.Success, durationMs);
