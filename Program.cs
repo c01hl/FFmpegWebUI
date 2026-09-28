@@ -8,7 +8,14 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Logging;
 
-var builder = WebApplication.CreateBuilder(args);
+// ContentRoot 必须显式指定：发布产物可能从任意工作目录启动（双击、
+// 桌面快捷方式、在仓库根目录执行 ./dist/<rid>/FFmpegWebUI……），
+// 详见 ResolveContentRoot 的说明。
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = ResolveContentRoot(),
+});
 
 // ────────────────────────────────────────────────────────────────────────────
 // 监听地址
@@ -194,6 +201,30 @@ static async Task InitializeApplicationAsync(IServiceProvider services)
             logger.LogWarning(ex, "硬件编码器检测失败，将使用软件编码");
         }
     });
+}
+
+/// <summary>
+/// 解析应用的内容根目录（ContentRoot）。
+///
+/// ASP.NET Core 默认把「当前工作目录」当 ContentRoot，而发布产物的静态资源
+/// 是相对 ContentRoot/wwwroot 查找的：带指纹的 js/css、组件旁挂的 .razor.js
+/// 在清单里都只记录相对路径（见 FFmpegWebUI.staticwebassets.endpoints.json
+/// 的 AssetFile 字段）。因此只要不是从发布目录内部启动，WebRootPath 就指向
+/// 一个不存在的 wwwroot —— MapStaticAssets 依然注册了路由，却发不出文件内容，
+/// 每个静态资源都变成 200 + 空响应体。浏览器按 importmap 里的 integrity 校验
+/// 空内容（空串的 SHA-256 是 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=），
+/// 于是报 “Failed to find a valid digest in the 'integrity' attribute” 并拦截脚本，
+/// Blazor 电路起不来，页面同时表现为无样式 + 「页面发生了未处理的错误」。
+///
+/// 判据：发布产物可执行文件旁边一定有 wwwroot（构建输出 bin/<cfg>/<tfm>/ 里没有），
+/// 有就用可执行文件目录，没有则沿用当前工作目录（dotnet run 的开发场景保持不变）。
+/// </summary>
+static string ResolveContentRoot()
+{
+    var baseDirectory = AppContext.BaseDirectory;
+    if (Directory.Exists(Path.Combine(baseDirectory, "wwwroot"))) return baseDirectory;
+
+    return Directory.GetCurrentDirectory();
 }
 
 static int ResolvePort(IConfiguration configuration, string[] args)
