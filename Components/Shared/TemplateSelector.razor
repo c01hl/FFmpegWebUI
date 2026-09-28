@@ -1,290 +1,932 @@
-@using FFmpegWebUI.Models
-@using FFmpegWebUI.Services
+@*
+    模板选择器（Convert / 批量处理共用）
+
+    · 可用性来自 IHardwareDetectionService.DetectAsync() 的真实检测报告，不使用任何硬编码编码器表；
+      设置变化后会自动重新检测（仅在 FFmpeg 路径变化时强制刷新，避免无谓的完整探测）。
+    · 过滤结果、分组、可用性文案都在 RebuildRows() 里一次性算好并缓存，
+      搜索输入做了 250ms 防抖，渲染时不会再跑 Where/OrderBy。
+    · 每个模板行都是真正的 <button>，因此键盘可聚焦、可回车/空格触发，并用 aria-pressed 表达选中态。
+*@
 @inject ITemplateService TemplateService
 @inject IHardwareDetectionService HardwareDetectionService
+@inject ISettingsService SettingsService
+@inject IToastService Toast
+@implements IDisposable
 
 <div class="template-selector">
-    <label class="selector-label">选择转换模板</label>
-    
-    <div class="search-box">
-        <input type="text" 
-               placeholder="搜索模板..." 
-               @bind="_searchText"
-               @bind:event="oninput" />
+    <div class="selector-header">
+        <h3 class="selector-label">选择转换模板</h3>
+        <div class="layout-toggle" role="group" aria-label="模板列表显示方式">
+            <button type="button" class="ffui-btn ffui-btn-sm"
+                    aria-pressed="@(_groupByCategory ? "true" : "false")"
+                    @onclick="() => SetGrouping(true)">按分类分组</button>
+            <button type="button" class="ffui-btn ffui-btn-sm"
+                    aria-pressed="@(!_groupByCategory ? "true" : "false")"
+                    @onclick="() => SetGrouping(false)">平铺列表</button>
+        </div>
     </div>
 
-    <div class="category-tabs">
-        <button class="tab @(_selectedCategory == null ? "active" : "")" 
-                @onclick="() => SelectCategory(null)">
-            全部
-        </button>
-        @foreach (var category in _categories)
+    @if (_isLoading)
+    {
+        <div class="ffui-loading-row" role="status">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>正在加载模板与硬件编码器…</span>
+        </div>
+    }
+    else
+    {
+        @if (_loadError != null)
         {
-            <button class="tab @(_selectedCategory == category ? "active" : "")"
-                    @onclick="() => SelectCategory(category)">
-                @category
+            <div class="selector-alert ffui-alert ffui-alert-danger">
+                <span role="alert">@_loadError</span>
+                <button type="button" class="ffui-btn ffui-btn-sm" @onclick="ReloadAsync">重试</button>
+            </div>
+        }
+
+        <div class="selector-alert ffui-alert @CapabilityAlertClass" role="status">
+            <span>@CapabilitySummary</span>
+        </div>
+
+        @if (_availabilityError != null)
+        {
+            <div class="selector-alert ffui-alert ffui-alert-warning" role="status">
+                <span>@_availabilityError</span>
+            </div>
+        }
+
+        <div class="search-box">
+            <label for="@_searchId">搜索</label>
+            <input id="@_searchId" type="search" placeholder="按名称、描述或标签搜索模板…"
+                   value="@_searchInput"
+                   @oninput="OnSearchInput"
+                   @onchange="OnSearchCommit" />
+        </div>
+
+        <div class="category-tabs" role="group" aria-label="模板分类筛选">
+            <button type="button" class="tab @(_selectedCategory == null ? "active" : "")"
+                    aria-pressed="@(_selectedCategory == null ? "true" : "false")"
+                    aria-label="显示全部分类的模板"
+                    @onclick="() => SelectCategory(null)">
+                全部
             </button>
-        }
-    </div>
-
-    <div class="templates-list">
-        @if (_filteredTemplates.Count == 0)
-        {
-            <div class="no-templates">没有找到匹配的模板</div>
-        }
-        else
-        {
-            @foreach (var template in _filteredTemplates)
+            @foreach (var category in _categories)
             {
-                var isSelected = SelectedTemplate?.Id == template.Id;
-                var isDisabled = template.RequiresHardwareAcceleration && 
-                                !string.IsNullOrEmpty(template.RequiredEncoder) &&
-                                !_availableEncoders.Contains(template.RequiredEncoder);
+                <button type="button" class="tab @(_selectedCategory == category ? "active" : "")"
+                        aria-pressed="@(_selectedCategory == category ? "true" : "false")"
+                        aria-label="筛选分类：@category"
+                        @key="category"
+                        @onclick="() => SelectCategory(category)">
+                    @category
+                </button>
+            }
+        </div>
 
-                <div class="template-item @(isSelected ? "selected" : "") @(isDisabled ? "disabled" : "")"
-                     @onclick="() => SelectTemplate(template, isDisabled)">
-                    <div class="template-header">
-                        <span class="template-name">@template.Name</span>
-                        @if (template.Type == TemplateType.System)
-                        {
-                            <span class="badge system">预设</span>
-                        }
-                        else
-                        {
-                            <span class="badge user">自定义</span>
-                        }
-                        @if (template.RequiresHardwareAcceleration)
-                        {
-                            <span class="badge hw @(isDisabled ? "unavailable" : "")">
-                                @(isDisabled ? "⚠️ 硬件加速" : "🚀 硬件加速")
-                            </span>
-                        }
-                    </div>
-                    <p class="template-desc">@template.Description</p>
-                    <div class="template-meta">
-                        <span class="meta-item">📁 输出: .@template.OutputExtension</span>
-                        @if (template.SupportedInputFormats.Count > 0)
-                        {
-                            <span class="meta-item">📥 输入: @string.Join(", ", template.SupportedInputFormats.Take(3))@(template.SupportedInputFormats.Count > 3 ? "..." : "")</span>
-                        }
-                    </div>
-                    @if (isDisabled)
+        @if (_unavailableCount > 0)
+        {
+            <div class="selector-alert ffui-alert @(EffectiveShowUnavailable ? "ffui-alert-info" : "ffui-alert-warning")">
+                <span role="status">@UnavailableNotice</span>
+                <button type="button" class="ffui-btn ffui-btn-sm" @onclick="ToggleShowUnavailable">
+                    @(EffectiveShowUnavailable ? "隐藏不可用模板" : "显示不可用模板")
+                </button>
+            </div>
+        }
+
+        <div class="templates-list">
+            @if (_rows.Count == 0)
+            {
+                <div class="ffui-empty-state">
+                    @if (_templates.Count == 0)
                     {
-                        <div class="disabled-reason">需要 @template.RequiredEncoder 编码器，当前不可用</div>
+                        <p>没有模板</p>
+                        <p class="empty-hint">模板库为空，请先在「模板管理」中创建模板或重置系统预设。</p>
+                    }
+                    else if (_unavailableCount > 0)
+                    {
+                        <p>@(_unavailableCount) 个匹配的模板在本机不可用</p>
+                        <button type="button" class="ffui-btn ffui-btn-sm" @onclick="ToggleShowUnavailable">
+                            显示不可用模板
+                        </button>
+                    }
+                    else
+                    {
+                        <p>没有匹配的搜索结果</p>
+                        <button type="button" class="ffui-btn ffui-btn-sm" @onclick="ClearFilters">清除筛选</button>
                     }
                 </div>
             }
-        }
-    </div>
+            else
+            {
+                @foreach (var row in _rows)
+                {
+                    @if (row.StartsGroup)
+                    {
+                        <div class="ffui-section-title group-title">
+                            <span>@(string.IsNullOrEmpty(row.Category) ? "未分类" : row.Category)</span>
+                            <span class="ffui-badge">@row.CategoryCount</span>
+                        </div>
+                    }
+
+                    <button type="button"
+                            class="template-item @(row.IsSelected ? "selected" : "") @(row.IsUnavailable ? "unavailable" : "") @(row.InputFormatRisky ? "format-warning" : "")"
+                            @key="row.Template.Id"
+                            disabled="@row.IsUnavailable"
+                            aria-pressed="@(row.IsSelected ? "true" : "false")"
+                            title="@row.Tooltip"
+                            @onclick="() => SelectTemplateAsync(row)">
+                        <span class="template-header">
+                            <span class="template-name">@row.Template.Name</span>
+                            <span class="ffui-badge @(row.Template.Type == TemplateType.System ? "" : "ffui-badge-success")">
+                                @(row.Template.Type == TemplateType.System ? "预设" : "自定义")
+                            </span>
+                            @if (row.EncoderBadge != null)
+                            {
+                                <span class="ffui-badge @row.EncoderBadgeClass">@row.EncoderBadge</span>
+                            }
+                        </span>
+
+                        <span class="template-desc">@row.Template.Description</span>
+
+                        <span class="template-meta">
+                            <span>📁 输出: .@row.Template.OutputExtension</span>
+                            @if (row.Template.SupportedInputFormats.Count > 0)
+                            {
+                                <span>📥 输入: @string.Join(", ", row.Template.SupportedInputFormats.Take(3))@(row.Template.SupportedInputFormats.Count > 3 ? "…" : "")</span>
+                            }
+                            @if (row.ParameterSummary != null)
+                            {
+                                <span>⚙ @row.ParameterSummary</span>
+                            }
+                        </span>
+
+                        @if (row.IsUnavailable && !string.IsNullOrEmpty(row.UnavailableReason))
+                        {
+                            <span class="row-message danger">@row.UnavailableReason</span>
+                        }
+                        else if (row.InputFormatRisky)
+                        {
+                            <span class="row-message warning">输入格式可能不兼容（当前文件为 @row.InputExtension）</span>
+                        }
+                    </button>
+                }
+            }
+        </div>
+    }
 </div>
 
 @code {
+    // ── 参数（原有参数保持不变）──────────────────────────────────────────
     [Parameter]
     public CommandTemplate? SelectedTemplate { get; set; }
 
     [Parameter]
     public EventCallback<CommandTemplate> SelectedTemplateChanged { get; set; }
 
+    /// <summary>当前输入文件路径；用于提示「输入格式可能不兼容」（只提示，不隐藏模板）</summary>
+    [Parameter]
+    public string? InputPath { get; set; }
+
+    /// <summary>是否显示本机不可用的模板（默认 false = 隐藏并给出计数提示）</summary>
+    [Parameter]
+    public bool ShowUnavailable { get; set; }
+
+    // ── 状态 ────────────────────────────────────────────────────────────
+    private readonly string _searchId = $"ffui-template-search-{Guid.NewGuid():N}";
+
     private List<CommandTemplate> _templates = [];
     private List<string> _categories = [];
-    private HashSet<string> _availableEncoders = [];
+    private HardwareDetectionReport? _report;
+    private HashSet<string> _availableEncoders = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, string> _encoderDisplayNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _recommendedEncoders = new(StringComparer.OrdinalIgnoreCase);
+
+    private List<TemplateRow> _rows = [];
+    private int _unavailableCount;
+
+    private bool _isLoading = true;
+    private string? _loadError;
+    private string? _availabilityError;
+
     private string? _selectedCategory;
-    private string _searchText = string.Empty;
+    private string _searchInput = string.Empty;   // 输入框里的原始文本
+    private string _searchText = string.Empty;    // 防抖后真正参与过滤的文本
+    private int _searchGeneration;
 
-    private List<CommandTemplate> _filteredTemplates => _templates
-        .Where(t => _selectedCategory == null || t.Category == _selectedCategory)
-        .Where(t => string.IsNullOrEmpty(_searchText) || 
-                    t.Name.Contains(_searchText, StringComparison.OrdinalIgnoreCase) ||
-                    t.Description.Contains(_searchText, StringComparison.OrdinalIgnoreCase))
-        .ToList();
+    private bool _groupByCategory = true;
+    private bool? _showUnavailableOverride;
 
+    private string? _lastInputPath;
+    private bool _lastShowUnavailable;
+    private bool _disposed;
+
+    /// <summary>父组件传入的 ShowUnavailable 与组件内的切换按钮共同决定显示结果（不修改参数本身）</summary>
+    private bool EffectiveShowUnavailable => _showUnavailableOverride ?? ShowUnavailable;
+
+    private bool HasHardware => _report?.HasHardwareAcceleration == true;
+
+    private string UnavailableNotice => EffectiveShowUnavailable
+        ? $"{_unavailableCount} 个模板需要本机没有的硬件编码器，当前仅作展示、无法选择。"
+        : $"{_unavailableCount} 个模板需要本机没有的硬件编码器，已隐藏。";
+
+    private string CapabilityAlertClass => _report == null
+        ? "ffui-alert-info"
+        : (HasHardware ? "ffui-alert-info" : "ffui-alert-warning");
+
+    private string CapabilitySummary
+    {
+        get
+        {
+            if (_report == null) return "尚未检测到硬件编码能力，模板可用性未知。";
+
+            var hardware = _report.AvailableHardwareEncoders;
+            if (hardware.Count == 0) return "未检测到硬件编码，将使用 CPU 软件编码。";
+
+            var names = hardware
+                .Select(e => string.IsNullOrWhiteSpace(e.DisplayName) ? e.Name : e.DisplayName)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .ToList();
+
+            var head = string.Join("、", names.Take(2));
+            return hardware.Count > 2
+                ? $"本机可用硬件编码：{head} 等 {hardware.Count} 项。"
+                : $"本机可用硬件编码：{head}。";
+        }
+    }
+
+    // ── 生命周期 ────────────────────────────────────────────────────────
     protected override async Task OnInitializedAsync()
     {
-        await LoadTemplates();
-        await LoadAvailableEncoders();
+        SettingsService.SettingsChanged += OnSettingsChanged;
+        await LoadAsync();
     }
 
-    private async Task LoadTemplates()
+    protected override void OnParametersSet()
     {
-        await TemplateService.InitializeSystemTemplatesAsync();
-        _templates = await TemplateService.GetAllTemplatesAsync();
-        _categories = await TemplateService.GetCategoriesAsync();
+        // 输入文件或「显示不可用」策略变化时，行内的兼容性提示需要重算
+        if (!string.Equals(_lastInputPath, InputPath, StringComparison.Ordinal) ||
+            _lastShowUnavailable != ShowUnavailable)
+        {
+            _lastInputPath = InputPath;
+            _lastShowUnavailable = ShowUnavailable;
+            RebuildRows();
+        }
     }
 
-    private async Task LoadAvailableEncoders()
+    public void Dispose()
     {
-        var encoders = await HardwareDetectionService.DetectEncodersAsync();
-        _availableEncoders = encoders.Where(e => e.IsAvailable).Select(e => e.Name).ToHashSet();
+        if (_disposed) return;
+        _disposed = true;
+        _searchGeneration++;   // 让仍在等待的防抖任务失效
+        SettingsService.SettingsChanged -= OnSettingsChanged;
     }
 
+    // ── 数据加载 ────────────────────────────────────────────────────────
+    private async Task LoadAsync()
+    {
+        _isLoading = true;
+        _loadError = null;
+
+        try
+        {
+            await TemplateService.InitializeSystemTemplatesAsync();
+            _templates = await TemplateService.GetAllTemplatesAsync() ?? [];
+            _categories = await TemplateService.GetCategoriesAsync() ?? [];
+            await LoadAvailabilityAsync(forceRefresh: _report == null);
+        }
+        catch (Exception ex)
+        {
+            _loadError = $"加载模板失败：{ex.Message}";
+            Toast.Error(_loadError);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+
+        RebuildRows();
+    }
+
+    private async Task ReloadAsync()
+    {
+        _isLoading = true;
+        StateHasChanged();
+        await LoadAsync();
+    }
+
+    /// <summary>读取真实检测报告并预计算「编码格式 → 编码器」映射</summary>
+    private async Task LoadAvailabilityAsync(bool forceRefresh)
+    {
+        _report = await HardwareDetectionService.DetectAsync(forceRefresh);
+        _availabilityError = null;
+
+        _availableEncoders = _report.Encoders
+            .Where(e => e.IsAvailable && !string.IsNullOrWhiteSpace(e.Name))
+            .Select(e => e.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        _encoderDisplayNames = _report.Encoders
+            .Where(e => !string.IsNullOrWhiteSpace(e.Name))
+            .GroupBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => string.IsNullOrWhiteSpace(g.First().DisplayName) ? g.Key : g.First().DisplayName,
+                StringComparer.OrdinalIgnoreCase);
+
+        await BuildRecommendedEncoderMapAsync();
+    }
+
+    /// <summary>
+    /// 每种「编码格式 + 必需编码器」只查询一次推荐编码器，
+    /// 避免在渲染时对每一行调用异步服务。
+    /// </summary>
+    private async Task BuildRecommendedEncoderMapAsync()
+    {
+        _recommendedEncoders.Clear();
+
+        var candidates = new List<(string Codec, string? Required)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var template in _templates)
+        {
+            if (!NeedsEncoder(template)) continue;
+
+            var codec = DetermineCodec(template);
+            var required = string.IsNullOrWhiteSpace(template.RequiredEncoder) ? null : template.RequiredEncoder!.Trim();
+            if (seen.Add(EncoderKey(codec, required))) candidates.Add((codec, required));
+        }
+
+        foreach (var (codec, required) in candidates)
+        {
+            try
+            {
+                var name = await HardwareDetectionService.GetRecommendedEncoderAsync(codec, required);
+                if (!string.IsNullOrWhiteSpace(name)) _recommendedEncoders[EncoderKey(codec, required)] = name;
+            }
+            catch (Exception ex)
+            {
+                _availabilityError = $"查询推荐编码器失败：{ex.Message}";
+                Toast.Warning(_availabilityError);
+            }
+        }
+    }
+
+    // ── 设置变化后重新检测 ──────────────────────────────────────────────
+    private void OnSettingsChanged(object? sender, EventArgs e) => _ = InvokeAsync(HandleSettingsChangedAsync);
+
+    private async Task HandleSettingsChangedAsync()
+    {
+        if (_disposed) return;
+
+        try
+        {
+            var settings = await SettingsService.GetSettingsAsync();
+            // FFmpeg 路径变了才强制重新探测，其它设置（主题、输出目录…）用缓存报告即可
+            var forceRefresh = _report == null ||
+                               !string.Equals(_report.FFmpegPath, settings.FFmpegPath, StringComparison.Ordinal);
+            await LoadAvailabilityAsync(forceRefresh);
+        }
+        catch (Exception ex)
+        {
+            _availabilityError = $"重新检测硬件编码器失败：{ex.Message}";
+            Toast.Error(_availabilityError);
+        }
+
+        RebuildRows();
+        StateHasChanged();
+    }
+
+    // ── 列表构建（过滤 + 分组 + 可用性文案，一次性缓存）──────────────────
+    private void RebuildRows()
+    {
+        if (_disposed) return;
+
+        var categoryOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < _categories.Count; i++) categoryOrder[_categories[i]] = i;
+
+        IEnumerable<CommandTemplate> query = _templates;
+
+        if (!string.IsNullOrEmpty(_selectedCategory))
+        {
+            var category = _selectedCategory;
+            query = query.Where(t => string.Equals(t.Category ?? string.Empty, category, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var search = _searchText.Trim();
+        if (search.Length > 0) query = query.Where(t => Matches(t, search));
+
+        var matched = query.ToList();
+
+        var categoryCounts = matched
+            .GroupBy(t => t.Category ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
+        IEnumerable<CommandTemplate> ordered = _groupByCategory
+            ? matched
+                .OrderBy(t => categoryOrder.TryGetValue(t.Category ?? string.Empty, out var index) ? index : int.MaxValue)
+                .ThenBy(t => t.SortOrder)
+                .ThenBy(t => t.Name ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            : matched;   // 平铺时保持服务返回的顺序（推荐优先）
+
+        var rows = new List<TemplateRow>(matched.Count);
+        var unavailableCount = 0;
+        string? lastCategory = null;
+
+        foreach (var template in ordered)
+        {
+            var category = template.Category ?? string.Empty;
+            var row = BuildRow(template, category, categoryCounts.TryGetValue(category, out var count) ? count : 0);
+
+            if (row.IsUnavailable)
+            {
+                unavailableCount++;
+                if (!EffectiveShowUnavailable) continue;
+            }
+
+            if (_groupByCategory && !string.Equals(lastCategory, category, StringComparison.OrdinalIgnoreCase))
+            {
+                row = row with { StartsGroup = true };
+                lastCategory = category;
+            }
+
+            rows.Add(row);
+        }
+
+        _rows = rows;
+        _unavailableCount = unavailableCount;
+    }
+
+    private TemplateRow BuildRow(CommandTemplate template, string category, int categoryCount)
+    {
+        var mode = EffectiveMode(template);
+        var codec = DetermineCodec(template);
+        var recommended = NeedsEncoder(template) ? GetRecommendedEncoderName(codec, template.RequiredEncoder) : null;
+
+        string? encoderBadge = null;
+        var encoderBadgeClass = "ffui-badge-info";
+        var isUnavailable = false;
+        string? unavailableReason = null;
+
+        if (mode == HardwareAccelerationMode.Required)
+        {
+            var required = template.RequiredEncoder?.Trim();
+
+            if (string.IsNullOrEmpty(required))
+            {
+                // 旧代码在这里会因为「没写编码器族」而当作可用，结果静默跑软件编码
+                isUnavailable = true;
+                unavailableReason = "模板未指定编码器族";
+                encoderBadge = "⚠ 硬件不可用";
+                encoderBadgeClass = "ffui-badge-danger";
+            }
+            else if (_report == null)
+            {
+                // 检测没跑起来时不能假设「可用」，否则模板会静默回退到软件编码
+                isUnavailable = true;
+                var familyName = EncoderCatalog.FamilyDisplayName(required);
+                unavailableReason = $"{familyName} 可用性未知：未能完成硬件编码器检测";
+                encoderBadge = "⚠ 可用性未知";
+                encoderBadgeClass = "ffui-badge-warning";
+            }
+            else
+            {
+                var members = EncoderCatalog.ExpandFamily(required);
+                var availableMember = members.FirstOrDefault(m => _availableEncoders.Contains(m));
+
+                if (availableMember == null)
+                {
+                    isUnavailable = true;
+                    var familyName = EncoderCatalog.FamilyDisplayName(required);
+                    unavailableReason = $"需要 {familyName} 硬件编码器，本机不可用";
+                    encoderBadge = "⚠ 硬件不可用";
+                    encoderBadgeClass = "ffui-badge-danger";
+                }
+                else
+                {
+                    encoderBadge = $"🚀 {DescribeEncoder(availableMember)}";
+                    encoderBadgeClass = "ffui-badge-success";
+                }
+            }
+        }
+        else if (mode == HardwareAccelerationMode.Auto)
+        {
+            if (recommended == null)
+            {
+                encoderBadge = "🚀 自动选择编码器";
+                encoderBadgeClass = "ffui-badge-info";
+            }
+            else if (IsHardwareEncoder(recommended))
+            {
+                encoderBadge = $"🚀 将使用 {DescribeEncoder(recommended)}";
+                encoderBadgeClass = "ffui-badge-info";
+            }
+            else
+            {
+                encoderBadge = $"将使用 {DescribeEncoder(recommended)}（软件编码）";
+                encoderBadgeClass = "ffui-badge-warning";
+            }
+        }
+        else if (recommended != null)
+        {
+            encoderBadge = $"🔧 使用 {DescribeEncoder(recommended)}";
+            encoderBadgeClass = "";
+        }
+
+        var extension = GetInputExtension();
+        var inputFormatRisky = IsInputFormatRisky(template);
+
+        return new TemplateRow(template, category, categoryCount)
+        {
+            IsSelected = SelectedTemplate?.Id == template.Id,
+            IsUnavailable = isUnavailable,
+            UnavailableReason = unavailableReason,
+            EncoderBadge = encoderBadge,
+            EncoderBadgeClass = encoderBadgeClass,
+            InputFormatRisky = inputFormatRisky,
+            InputExtension = inputFormatRisky ? extension : null,
+            ParameterSummary = template.Parameters.Count > 0 ? $"{template.Parameters.Count} 个可调参数" : null
+        };
+    }
+
+    private static bool Matches(CommandTemplate template, string search) =>
+        (template.Name ?? string.Empty).Contains(search, StringComparison.OrdinalIgnoreCase) ||
+        (template.Description ?? string.Empty).Contains(search, StringComparison.OrdinalIgnoreCase) ||
+        (template.Category ?? string.Empty).Contains(search, StringComparison.OrdinalIgnoreCase) ||
+        (template.Tags ?? []).Any(tag => (tag ?? string.Empty).Contains(search, StringComparison.OrdinalIgnoreCase));
+
+    // ── 编码器辅助 ──────────────────────────────────────────────────────
+    private static HardwareAccelerationMode EffectiveMode(CommandTemplate template)
+    {
+        if (template.HardwareMode != HardwareAccelerationMode.None) return template.HardwareMode;
+
+        // 兼容旧数据：标了「需要硬件加速」且给出了编码器，但 HardwareMode 还没升级成 Required
+        if (template.RequiresHardwareAcceleration && !string.IsNullOrWhiteSpace(template.RequiredEncoder))
+        {
+            return HardwareAccelerationMode.Required;
+        }
+
+        return HardwareAccelerationMode.None;
+    }
+
+    private static bool NeedsEncoder(CommandTemplate template) =>
+        EffectiveMode(template) != HardwareAccelerationMode.None ||
+        (template.CommandArgs ?? string.Empty).Contains("{encoder}", StringComparison.OrdinalIgnoreCase);
+
+    private static string DetermineCodec(CommandTemplate template)
+    {
+        if (!string.IsNullOrWhiteSpace(template.TargetCodec))
+        {
+            return FFmpegWebUI.Services.HardwareDetectionService.NormalizeCodec(template.TargetCodec);
+        }
+
+        if (!string.IsNullOrWhiteSpace(template.RequiredEncoder))
+        {
+            var profile = EncoderCatalog.Find(template.RequiredEncoder!);
+            if (profile != null) return profile.Codec;
+
+            var family = EncoderCatalog.ByFamily(template.RequiredEncoder!).FirstOrDefault();
+            if (family != null) return family.Codec;
+        }
+
+        var fromExtension = FFmpegWebUI.Services.HardwareDetectionService.NormalizeCodec(template.OutputExtension);
+        return fromExtension is "h264" or "hevc" or "av1" or "vp9" or "vp8" ? fromExtension : "h264";
+    }
+
+    private static string EncoderKey(string codec, string? required) => codec + "|" + (required ?? string.Empty).Trim();
+
+    private string? GetRecommendedEncoderName(string codec, string? required) =>
+        _recommendedEncoders.TryGetValue(EncoderKey(codec, required), out var name) ? name : null;
+
+    private bool IsHardwareEncoder(string encoderName)
+    {
+        var detected = _report?.Encoders
+            .FirstOrDefault(e => string.Equals(e.Name, encoderName, StringComparison.OrdinalIgnoreCase));
+        if (detected != null) return detected.IsHardware;
+
+        return EncoderCatalog.Find(encoderName)?.IsHardware == true;
+    }
+
+    private string DescribeEncoder(string encoderName)
+    {
+        if (_encoderDisplayNames.TryGetValue(encoderName, out var display) && !string.IsNullOrWhiteSpace(display))
+        {
+            return display;
+        }
+
+        return EncoderCatalog.Find(encoderName)?.DisplayName ?? encoderName;
+    }
+
+    // ── 输入格式提示（SupportedInputFormats 只是参考信息，这里只做提醒）──
+    private string? GetInputExtension()
+    {
+        if (string.IsNullOrWhiteSpace(InputPath)) return null;
+        var extension = Path.GetExtension(InputPath).Trim().TrimStart('.').ToLowerInvariant();
+        return extension.Length == 0 ? null : extension;
+    }
+
+    private bool IsInputFormatRisky(CommandTemplate template)
+    {
+        var extension = GetInputExtension();
+        if (extension == null) return false;
+
+        var formats = template.SupportedInputFormats;
+        if (formats == null || formats.Count == 0) return false;   // 空表示不限
+
+        return !formats.Any(f =>
+            string.Equals((f ?? string.Empty).Trim().TrimStart('.'), extension, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // ── 交互 ────────────────────────────────────────────────────────────
     private void SelectCategory(string? category)
     {
         _selectedCategory = category;
+        RebuildRows();
     }
 
-    private async Task SelectTemplate(CommandTemplate template, bool isDisabled)
+    private void SetGrouping(bool groupByCategory)
     {
-        if (isDisabled) return;
-        
-        SelectedTemplate = template;
-        await SelectedTemplateChanged.InvokeAsync(template);
+        if (_groupByCategory == groupByCategory) return;
+        _groupByCategory = groupByCategory;
+        RebuildRows();
+    }
+
+    private void ToggleShowUnavailable()
+    {
+        _showUnavailableOverride = !EffectiveShowUnavailable;
+        RebuildRows();
+    }
+
+    private void ClearFilters()
+    {
+        _selectedCategory = null;
+        _searchInput = string.Empty;
+        _searchText = string.Empty;
+        _searchGeneration++;   // 丢弃仍在等待的防抖任务
+        RebuildRows();
+    }
+
+    private async Task OnSearchInput(ChangeEventArgs e)
+    {
+        var raw = e.Value?.ToString() ?? string.Empty;
+        _searchInput = raw;
+
+        // 用「代号」而不是 CancellationToken 做防抖：更晚的输入会让本次任务失效，
+        // 同时也避免依赖会抛异常的 Task.Delay(token)。
+        var generation = ++_searchGeneration;
+        await Task.Delay(250);
+
+        if (_disposed || generation != _searchGeneration) return;
+        if (string.Equals(_searchText, raw, StringComparison.Ordinal)) return;
+
+        _searchText = raw;
+        RebuildRows();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OnSearchCommit(ChangeEventArgs e)
+    {
+        var raw = e.Value?.ToString() ?? string.Empty;
+        _searchInput = raw;
+        _searchGeneration++;
+
+        if (!string.Equals(_searchText, raw, StringComparison.Ordinal))
+        {
+            _searchText = raw;
+            RebuildRows();
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task SelectTemplateAsync(TemplateRow row)
+    {
+        if (row.IsUnavailable) return;
+
+        // 只通过回调通知父组件，绝不修改 [Parameter] SelectedTemplate
+        try
+        {
+            await SelectedTemplateChanged.InvokeAsync(row.Template);
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"选择模板失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>一行模板在界面上的完整呈现数据</summary>
+    private sealed record TemplateRow(CommandTemplate Template, string Category, int CategoryCount)
+    {
+        public bool StartsGroup { get; init; }
+        public bool IsSelected { get; init; }
+        public bool IsUnavailable { get; init; }
+        public string? UnavailableReason { get; init; }
+        public string? EncoderBadge { get; init; }
+        public string EncoderBadgeClass { get; init; } = "ffui-badge-info";
+        public bool InputFormatRisky { get; init; }
+        public string? InputExtension { get; init; }
+        public string? ParameterSummary { get; init; }
+
+        public string? Tooltip => IsUnavailable
+            ? UnavailableReason
+            : (InputFormatRisky ? "输入格式可能不兼容，仍然可以选择" : null);
     }
 }
 
 <style>
     .template-selector {
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 8px;
-        background: var(--card-bg, white);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        background: var(--card-bg);
         overflow: hidden;
     }
 
+    .selector-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+        flex-wrap: wrap;
+        padding: var(--spacing-3) var(--spacing-4);
+        background: var(--surface-3);
+        border-bottom: 1px solid var(--border-color);
+    }
+
     .selector-label {
-        display: block;
-        padding: 1rem;
+        margin: 0;
+        font-size: 1rem;
         font-weight: 600;
-        background: var(--light-bg, #f8f9fa);
-        border-bottom: 1px solid var(--border-color, #ddd);
-        color: var(--text-primary, #333);
+        color: var(--text-primary);
+    }
+
+    .layout-toggle {
+        display: flex;
+        gap: var(--spacing-1);
+    }
+
+    .selector-alert {
+        margin: var(--spacing-3) var(--spacing-4) 0;
+        align-items: center;
+        justify-content: space-between;
     }
 
     .search-box {
-        padding: 0.75rem 1rem;
-        border-bottom: 1px solid var(--border-color, #eee);
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-2);
+        padding: var(--spacing-3) var(--spacing-4);
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .search-box label {
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        white-space: nowrap;
     }
 
     .search-box input {
-        width: 100%;
+        flex: 1;
+        min-width: 0;
         padding: 0.5rem;
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 4px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        background: var(--input-bg);
+        color: var(--text-primary);
         font-size: 0.9rem;
-        background: var(--input-bg, white);
-        color: var(--text-primary, #333);
+        font-family: inherit;
     }
 
     .category-tabs {
         display: flex;
-        gap: 0.25rem;
-        padding: 0.5rem 1rem;
-        background: var(--light-bg, #f8f9fa);
-        border-bottom: 1px solid var(--border-color, #ddd);
+        gap: var(--spacing-1);
+        padding: var(--spacing-2) var(--spacing-4);
+        background: var(--surface-3);
+        border-bottom: 1px solid var(--border-color);
         overflow-x: auto;
     }
 
     .tab {
         padding: 0.4rem 0.8rem;
         border: none;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         background: transparent;
         cursor: pointer;
         font-size: 0.85rem;
+        font-family: inherit;
         white-space: nowrap;
-        color: var(--text-secondary, #666);
-        transition: background 0.2s, color 0.2s;
+        color: var(--text-secondary);
+        transition: background 0.15s ease, color 0.15s ease;
     }
 
     .tab:hover {
-        background: var(--card-bg, #e9ecef);
-        color: var(--text-primary, #333);
+        background: var(--surface-2);
+        color: var(--text-primary);
     }
 
     .tab.active {
-        background: #007bff;
-        color: white;
+        background: var(--primary-color);
+        color: var(--primary-contrast);
+    }
+
+    .tab:focus-visible,
+    .template-item:focus-visible {
+        outline: 2px solid var(--primary-color);
+        outline-offset: -2px;
     }
 
     .templates-list {
-        max-height: 400px;
+        max-height: 420px;
         overflow-y: auto;
     }
 
-    .no-templates {
-        padding: 2rem;
-        text-align: center;
-        color: var(--text-secondary, #666);
+    .group-title {
+        padding: var(--spacing-3) var(--spacing-4) var(--spacing-1);
+        margin: 0;
+        font-size: 0.95rem;
+        color: var(--text-secondary);
+        background: var(--card-bg);
+        border-top: 1px solid var(--border-color);
     }
 
     .template-item {
-        padding: 1rem;
-        border-bottom: 1px solid var(--border-color, #eee);
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        padding: var(--spacing-4);
+        border: none;
+        border-bottom: 1px solid var(--border-color);
+        background: transparent;
+        text-align: left;
+        font-family: inherit;
+        font-size: 1rem;
+        color: var(--text-primary);
         cursor: pointer;
-        transition: background 0.2s;
-        color: var(--text-primary, #333);
+        transition: background 0.15s ease;
     }
 
-    .template-item:hover:not(.disabled) {
-        background: var(--light-bg, #f8f9fa);
+    .template-item:hover:not(:disabled) {
+        background: var(--surface-3);
     }
 
     .template-item.selected {
-        background: #e7f1ff;
-        border-left: 3px solid #007bff;
+        background: var(--primary-light);
+        border-left: 3px solid var(--primary-color);
     }
 
-    .template-item.disabled {
-        opacity: 0.6;
+    .template-item.unavailable {
+        opacity: 0.65;
         cursor: not-allowed;
+    }
+
+    .template-item.format-warning {
+        border-left: 3px solid var(--warning-color);
     }
 
     .template-header {
         display: flex;
         align-items: center;
-        gap: 0.5rem;
-        margin-bottom: 0.5rem;
+        gap: var(--spacing-2);
+        flex-wrap: wrap;
     }
 
     .template-name {
-        font-weight: 500;
-        color: var(--text-primary, #333);
-    }
-
-    .badge {
-        padding: 0.15rem 0.5rem;
-        border-radius: 3px;
-        font-size: 0.75rem;
-    }
-
-    .badge.system {
-        background: #e9ecef;
-        color: #495057;
-    }
-
-    .badge.user {
-        background: #d4edda;
-        color: #155724;
-    }
-
-    .badge.hw {
-        background: #cce5ff;
-        color: #004085;
-    }
-
-    .badge.hw.unavailable {
-        background: #fff3cd;
-        color: #856404;
+        font-weight: 600;
     }
 
     .template-desc {
-        margin: 0;
+        display: block;
+        margin: var(--spacing-1) 0 0;
         font-size: 0.9rem;
-        color: var(--text-secondary, #666);
+        color: var(--text-secondary);
     }
 
     .template-meta {
         display: flex;
-        gap: 1rem;
-        margin-top: 0.5rem;
+        flex-wrap: wrap;
+        gap: var(--spacing-3);
+        margin-top: var(--spacing-2);
         font-size: 0.8rem;
-        color: var(--text-muted, #888);
+        color: var(--text-muted);
     }
 
-    .disabled-reason {
-        margin-top: 0.5rem;
-        padding: 0.25rem 0.5rem;
-        background: #fff3cd;
-        border-radius: 4px;
+    .row-message {
+        display: block;
+        margin-top: var(--spacing-2);
+        padding: 0.3rem 0.5rem;
+        border-radius: var(--radius-sm);
         font-size: 0.8rem;
-        color: #856404;
+    }
+
+    .row-message.danger {
+        background: var(--danger-bg);
+        color: var(--danger-text);
+    }
+
+    .row-message.warning {
+        background: var(--warning-bg);
+        color: var(--warning-text);
+    }
+
+    .empty-hint {
+        margin: 0.5rem 0 0;
+        font-size: 0.85rem;
+        color: var(--text-muted);
     }
 </style>

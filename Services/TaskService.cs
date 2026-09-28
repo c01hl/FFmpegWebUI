@@ -5,45 +5,101 @@ using TaskStatus = FFmpegWebUI.Models.TaskStatus;
 
 namespace FFmpegWebUI.Services;
 
-/// <summary>任务管理服务实现</summary>
-public class TaskService(
-    ILiteDbContext db,
-    IFFmpegService ffmpegService,
-    ITemplateService templateService,
-    IFileService fileService) : ITaskService
+/// <summary>
+/// 任务管理服务（单例）。
+/// 只负责任务的创建/查询/删除，实际执行交给 <see cref="ConversionQueue"/>，
+/// 因此页面可以在任意时刻跳转而不影响正在进行的转换。
+/// </summary>
+public sealed class TaskService : ITaskService
 {
-    private CancellationTokenSource? _currentCts;
+    public TaskService(
+        ILiteDbContext db,
+        IFFmpegService ffmpegService,
+        ITemplateService templateService,
+        IFileService fileService,
+        ISettingsService settingsService,
+        ConversionQueue queue)
+    {
+        Db = db;
+        FFmpegService = ffmpegService;
+        TemplateService = templateService;
+        FileService = fileService;
+        SettingsService = settingsService;
+        Queue = queue;
+
+        Queue.TaskProgressChanged += (_, e) => TaskProgressChanged?.Invoke(this, e);
+        Queue.TaskStatusChanged += (_, e) => TaskStatusChanged?.Invoke(this, e);
+        Queue.TaskLogAppended += (_, e) => TaskLogAppended?.Invoke(this, e);
+    }
+
+    private ILiteDbContext Db { get; }
+    private IFFmpegService FFmpegService { get; }
+    private ITemplateService TemplateService { get; }
+    private IFileService FileService { get; }
+    private ISettingsService SettingsService { get; }
+    private ConversionQueue Queue { get; }
 
     public event EventHandler<TaskProgressEventArgs>? TaskProgressChanged;
     public event EventHandler<TaskStatusEventArgs>? TaskStatusChanged;
+    public event EventHandler<TaskLogEventArgs>? TaskLogAppended;
 
-    public async Task<ConversionTask> CreateTaskAsync(string inputPath, string outputPath, ObjectId templateId)
+    public int QueuedCount => Queue.QueuedCount;
+    public int ActiveCount => Queue.ActiveCount;
+
+    // ────────────────────────────────────────────────────────────────
+    // 创建
+    // ────────────────────────────────────────────────────────────────
+
+    public async Task<ConversionTask> CreateTaskAsync(
+        string inputPath,
+        string outputPath,
+        ObjectId templateId,
+        Dictionary<string, string>? parameters = null,
+        bool? overwriteExisting = null)
     {
-        var template = await templateService.GetTemplateByIdAsync(templateId)
-            ?? throw new ArgumentException("Template not found", nameof(templateId));
+        if (string.IsNullOrWhiteSpace(inputPath))
+            throw new ArgumentException("输入文件路径不能为空", nameof(inputPath));
+        if (string.IsNullOrWhiteSpace(outputPath))
+            throw new ArgumentException("输出文件路径不能为空", nameof(outputPath));
 
-        var mediaInfo = await ffmpegService.GetMediaInfoAsync(inputPath);
+        var template = await TemplateService.GetTemplateByIdAsync(templateId).ConfigureAwait(false)
+            ?? throw new ArgumentException("模板不存在或已被删除", nameof(templateId));
+
+        if (!FileService.IsFileAccessible(inputPath))
+            throw new FileNotFoundException($"输入文件不存在或不可读：{inputPath}");
+
+        var mediaInfo = await FFmpegService.GetMediaInfoAsync(inputPath).ConfigureAwait(false);
 
         var task = new ConversionTask
         {
-            InputPath = inputPath,
-            OutputPath = outputPath,
+            InputPath = AppPaths.ToAbsolute(inputPath),
+            OutputPath = AppPaths.ToAbsolute(outputPath),
             TemplateId = templateId,
-            ActualCommand = ffmpegService.BuildCommand(template, inputPath, outputPath),
+            TemplateName = template.Name,
+            TemplateParameters = parameters == null ? null : new Dictionary<string, string>(parameters),
+            OutputPathResolved = overwriteExisting.HasValue,
+            OverwriteExisting = overwriteExisting ?? true,
             Status = TaskStatus.Pending,
             TotalDuration = mediaInfo?.Duration ?? 0,
-            InputFileSize = fileService.GetFileSize(inputPath),
+            InputFileSize = FileService.GetFileSize(inputPath),
             CreatedAt = DateTime.UtcNow
         };
 
-        db.Tasks.Insert(task);
+        Db.Tasks.Insert(task);
         return task;
     }
 
-    public async Task<BatchTask> CreateBatchTaskAsync(List<string> inputPaths, string outputDirectory, ObjectId templateId)
+    public async Task<BatchTask> CreateBatchTaskAsync(
+        List<string> inputPaths,
+        string outputDirectory,
+        ObjectId templateId,
+        Dictionary<string, string>? parameters = null)
     {
-        var template = await templateService.GetTemplateByIdAsync(templateId)
-            ?? throw new ArgumentException("Template not found", nameof(templateId));
+        if (inputPaths.Count == 0)
+            throw new ArgumentException("批量任务至少需要一个文件", nameof(inputPaths));
+
+        var template = await TemplateService.GetTemplateByIdAsync(templateId).ConfigureAwait(false)
+            ?? throw new ArgumentException("模板不存在或已被删除", nameof(templateId));
 
         var batch = new BatchTask
         {
@@ -53,227 +109,236 @@ public class TaskService(
             Status = TaskStatus.Pending,
             CreatedAt = DateTime.UtcNow
         };
+        Db.BatchTasks.Insert(batch);
 
-        db.BatchTasks.Insert(batch);
+        var extension = string.IsNullOrWhiteSpace(template.OutputExtension)
+            ? "mp4"
+            : template.OutputExtension.TrimStart('.');
 
-        // 为每个文件创建子任务
+        // 批量处理与单文件转换使用同一套命名规则，避免「设置改了但批量不生效」
+        var settings = (await SettingsService.GetSettingsAsync().ConfigureAwait(false)).Normalize();
+        var suffix = settings.OutputNaming == OutputNamingRule.Suffix ? settings.OutputSuffix : null;
+
         foreach (var inputPath in inputPaths)
         {
-            var outputPath = fileService.GenerateOutputPath(
-                inputPath,
-                outputDirectory,
-                template.OutputExtension,
-                "_converted");
-
-            var mediaInfo = await ffmpegService.GetMediaInfoAsync(inputPath);
+            var outputPath = FileService.GenerateOutputPath(inputPath, outputDirectory, extension, suffix);
+            var mediaInfo = await FFmpegService.GetMediaInfoAsync(inputPath).ConfigureAwait(false);
 
             var task = new ConversionTask
             {
-                InputPath = inputPath,
-                OutputPath = outputPath,
+                InputPath = AppPaths.ToAbsolute(inputPath),
+                OutputPath = AppPaths.ToAbsolute(outputPath),
                 TemplateId = templateId,
-                ActualCommand = ffmpegService.BuildCommand(template, inputPath, outputPath),
+                TemplateName = template.Name,
+                TemplateParameters = parameters == null ? null : new Dictionary<string, string>(parameters),
                 Status = TaskStatus.Pending,
                 TotalDuration = mediaInfo?.Duration ?? 0,
-                InputFileSize = fileService.GetFileSize(inputPath),
+                InputFileSize = FileService.GetFileSize(inputPath),
                 BatchId = batch.Id,
                 CreatedAt = DateTime.UtcNow
             };
-
-            db.Tasks.Insert(task);
+            Db.Tasks.Insert(task);
         }
 
         return batch;
     }
 
-    public async Task StartTaskAsync(ObjectId taskId)
+    // ────────────────────────────────────────────────────────────────
+    // 执行
+    // ────────────────────────────────────────────────────────────────
+
+    public Task<bool> StartTaskAsync(ObjectId taskId)
     {
-        var task = db.Tasks.FindById(taskId)
-            ?? throw new ArgumentException("Task not found", nameof(taskId));
+        var task = Db.Tasks.FindById(taskId);
+        if (task == null) return Task.FromResult(false);
 
-        if (task.Status != TaskStatus.Pending)
+        if (task.Status is not (TaskStatus.Pending or TaskStatus.Failed or TaskStatus.Cancelled or TaskStatus.Skipped))
         {
-            throw new InvalidOperationException("Task is not in pending state");
+            return Task.FromResult(false);
         }
 
-        // 更新状态为运行中
-        var oldStatus = task.Status;
-        task.Status = TaskStatus.Running;
-        task.StartedAt = DateTime.UtcNow;
-        db.Tasks.Update(task);
+        // 重置为待执行，之后交由队列处理
+        task.Status = TaskStatus.Pending;
+        task.Progress = 0;
+        task.CurrentTime = 0;
+        task.EstimatedTimeRemaining = null;
+        task.ProcessingSpeed = null;
+        task.ErrorMessage = null;
+        task.CompletedAt = null;
+        task.LogOutput = string.Empty;
+        Db.Tasks.Update(task);
 
-        OnTaskStatusChanged(task.Id, oldStatus, task.Status, null);
-
-        _currentCts = new CancellationTokenSource();
-
-        try
-        {
-            await ffmpegService.ExecuteConversionAsync(
-                task,
-                progress =>
-                {
-                    task.Progress = progress.Percentage;
-                    task.CurrentTime = progress.CurrentTime;
-                    task.ProcessingSpeed = progress.Speed;
-                    task.EstimatedTimeRemaining = progress.Eta;
-                    task.LogOutput += progress.RawOutput + Environment.NewLine;
-
-                    db.Tasks.Update(task);
-                    OnTaskProgressChanged(task.Id, progress.Percentage, progress.Speed, progress.Eta);
-                },
-                _currentCts.Token);
-
-            // 任务完成
-            task.Status = TaskStatus.Completed;
-            task.Progress = 100;
-            task.CompletedAt = DateTime.UtcNow;
-            task.OutputFileSize = fileService.GetFileSize(task.OutputPath);
-            db.Tasks.Update(task);
-
-            OnTaskStatusChanged(task.Id, TaskStatus.Running, TaskStatus.Completed, null);
-
-            // 更新批量任务状态
-            await UpdateBatchTaskStatusAsync(task.BatchId);
-        }
-        catch (OperationCanceledException)
-        {
-            task.Status = TaskStatus.Cancelled;
-            task.CompletedAt = DateTime.UtcNow;
-            db.Tasks.Update(task);
-
-            OnTaskStatusChanged(task.Id, TaskStatus.Running, TaskStatus.Cancelled, "用户取消");
-            await UpdateBatchTaskStatusAsync(task.BatchId);
-        }
-        catch (Exception ex)
-        {
-            task.Status = TaskStatus.Failed;
-            task.ErrorMessage = ex.Message;
-            task.CompletedAt = DateTime.UtcNow;
-            db.Tasks.Update(task);
-
-            OnTaskStatusChanged(task.Id, TaskStatus.Running, TaskStatus.Failed, ex.Message);
-            await UpdateBatchTaskStatusAsync(task.BatchId);
-        }
-        finally
-        {
-            _currentCts?.Dispose();
-            _currentCts = null;
-        }
+        return Task.FromResult(Queue.Enqueue(taskId));
     }
 
-    public async Task CancelTaskAsync(ObjectId taskId)
+    public async Task<BatchTask> StartBatchTaskAsync(
+        List<string> inputPaths,
+        string outputDirectory,
+        ObjectId templateId,
+        Dictionary<string, string>? parameters = null)
     {
-        var task = db.Tasks.FindById(taskId);
-        if (task == null) return;
+        var batch = await CreateBatchTaskAsync(inputPaths, outputDirectory, templateId, parameters).ConfigureAwait(false);
 
-        if (task.Status == TaskStatus.Running)
-        {
-            _currentCts?.Cancel();
-            await ffmpegService.CancelTaskAsync(taskId);
-        }
-        else if (task.Status == TaskStatus.Pending)
-        {
-            var oldStatus = task.Status;
-            task.Status = TaskStatus.Cancelled;
-            task.CompletedAt = DateTime.UtcNow;
-            db.Tasks.Update(task);
+        var tasks = Db.Tasks.Query()
+            .Where(t => t.BatchId == batch.Id && t.Status == TaskStatus.Pending)
+            .OrderBy(t => t.CreatedAt)
+            .ToList();
 
-            OnTaskStatusChanged(task.Id, oldStatus, TaskStatus.Cancelled, "用户取消");
+        foreach (var task in tasks)
+        {
+            Queue.Enqueue(task.Id);
         }
+
+        batch.Status = TaskStatus.Running;
+        Db.BatchTasks.Update(batch);
+        return batch;
     }
 
-    public Task<ConversionTask?> GetTaskByIdAsync(ObjectId taskId)
-    {
-        var task = db.Tasks.FindById(taskId);
-        return Task.FromResult(task);
-    }
+    public Task<bool> CancelTaskAsync(ObjectId taskId, bool graceful = false) =>
+        Queue.CancelAsync(taskId, graceful);
+
+    public Task CancelBatchAsync(ObjectId batchId) => Queue.CancelBatchAsync(batchId);
+
+    // ────────────────────────────────────────────────────────────────
+    // 查询
+    // ────────────────────────────────────────────────────────────────
+
+    public Task<ConversionTask?> GetTaskByIdAsync(ObjectId taskId) =>
+        // LiteDB 的 FindById 未标注可空性，这里显式声明返回类型
+        Task.FromResult<ConversionTask?>(Db.Tasks.FindById(taskId));
 
     public Task<List<ConversionTask>> GetTaskHistoryAsync(int limit = 50, TaskStatus? status = null)
     {
-        var query = db.Tasks.Query();
-
+        var query = Db.Tasks.Query();
         if (status.HasValue)
         {
-            query = query.Where(t => t.Status == status.Value);
+            var snapshot = status.Value;
+            query = query.Where(t => t.Status == snapshot);
         }
 
         var tasks = query
             .OrderByDescending(t => t.CreatedAt)
-            .Limit(limit)
+            .Limit(Math.Max(1, limit))
             .ToList();
 
         return Task.FromResult(tasks);
-    }
-
-    public Task<ConversionTask?> GetRunningTaskAsync()
-    {
-        var task = db.Tasks
-            .Query()
-            .Where(t => t.Status == TaskStatus.Running)
-            .FirstOrDefault();
-
-        return Task.FromResult(task);
     }
 
     public Task<List<ConversionTask>> GetRunningTasksAsync()
     {
-        var tasks = db.Tasks
-            .Query()
-            .Where(t => t.Status == TaskStatus.Running || t.Status == TaskStatus.Pending)
+        var tasks = Db.Tasks.Query()
+            .Where(t => t.Status == TaskStatus.Running)
             .OrderByDescending(t => t.CreatedAt)
             .ToList();
-
         return Task.FromResult(tasks);
     }
 
-    public async Task<bool> SendCommandToTaskAsync(ObjectId taskId, string command)
+    public Task<List<ConversionTask>> GetPendingTasksAsync()
     {
-        var task = db.Tasks.FindById(taskId);
-        if (task == null || task.Status != TaskStatus.Running)
-            return false;
+        var tasks = Db.Tasks.Query()
+            .Where(t => t.Status == TaskStatus.Pending)
+            .OrderBy(t => t.CreatedAt)
+            .ToList();
+        return Task.FromResult(tasks);
+    }
 
-        return await ffmpegService.SendInputAsync(taskId, command);
+    public Task<List<ConversionTask>> GetBatchTasksAsync(ObjectId batchId)
+    {
+        var tasks = Db.Tasks.Query()
+            .Where(t => t.BatchId == batchId)
+            .OrderBy(t => t.CreatedAt)
+            .ToList();
+        return Task.FromResult(tasks);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 重试 / 删除
+    // ────────────────────────────────────────────────────────────────
+
+    public async Task<ConversionTask?> RetryTaskAsync(ObjectId taskId)
+    {
+        var source = Db.Tasks.FindById(taskId);
+        if (source == null) return null;
+
+        // 同一批次里已有等待/运行中的同名任务时不重复创建
+        var retry = new ConversionTask
+        {
+            InputPath = source.InputPath,
+            OutputPath = source.OutputPath,
+            TemplateId = source.TemplateId,
+            TemplateName = source.TemplateName,
+            TemplateParameters = source.TemplateParameters == null
+                ? null
+                : new Dictionary<string, string>(source.TemplateParameters),
+            Status = TaskStatus.Pending,
+            TotalDuration = source.TotalDuration,
+            InputFileSize = source.InputFileSize,
+            BatchId = source.BatchId,
+            RetryOfTaskId = source.Id,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        Db.Tasks.Insert(retry);
+        Queue.Enqueue(retry.Id);
+        return retry;
+    }
+
+    public Task<int> DeleteTasksAsync(IEnumerable<ObjectId> taskIds)
+    {
+        var ids = taskIds.ToList();
+        var removed = 0;
+
+        foreach (var id in ids)
+        {
+            var task = Db.Tasks.FindById(id);
+            if (task == null) continue;
+
+            // 运行中的任务不允许直接删除
+            if (task.Status == TaskStatus.Running)
+            {
+                _ = Queue.CancelAsync(id, graceful: false);
+                continue;
+            }
+
+            if (Db.Tasks.Delete(id)) removed++;
+        }
+
+        return Task.FromResult(removed);
+    }
+
+    public Task<int> DeleteTasksByStatusAsync(TaskStatus status)
+    {
+        var removed = Db.Tasks.DeleteMany(t => t.Status == status);
+        return Task.FromResult(removed);
     }
 
     public Task<int> CleanupHistoryAsync(DateTime olderThan)
     {
-        var count = db.Tasks.DeleteMany(t => t.CreatedAt < olderThan);
+        var count = Db.Tasks.DeleteMany(t =>
+            t.CreatedAt < olderThan &&
+            (t.Status == TaskStatus.Completed || t.Status == TaskStatus.Failed ||
+             t.Status == TaskStatus.Cancelled || t.Status == TaskStatus.Skipped));
+
+        // 顺带清理已经没有子任务的批次记录
+        var staleBatches = Db.BatchTasks.Query().Where(b => b.CreatedAt < olderThan).ToList();
+        foreach (var batch in staleBatches)
+        {
+            var remaining = Db.Tasks.Query().Where(t => t.BatchId == batch.Id).Count();
+            if (remaining == 0) Db.BatchTasks.Delete(batch.Id);
+        }
+
         return Task.FromResult(count);
     }
 
-    private Task UpdateBatchTaskStatusAsync(ObjectId? batchId)
+    public Task<int> ClearHistoryAsync()
     {
-        if (batchId == null) return Task.CompletedTask;
+        var count = Db.Tasks.DeleteMany(t =>
+            t.Status == TaskStatus.Completed || t.Status == TaskStatus.Failed ||
+            t.Status == TaskStatus.Cancelled || t.Status == TaskStatus.Skipped);
 
-        var batch = db.BatchTasks.FindById(batchId);
-        if (batch == null) return Task.CompletedTask;
-
-        var tasks = db.Tasks.Query().Where(t => t.BatchId == batchId).ToList();
-
-        batch.CompletedFiles = tasks.Count(t => t.Status == TaskStatus.Completed);
-        batch.FailedFiles = tasks.Count(t => t.Status == TaskStatus.Failed || t.Status == TaskStatus.Cancelled);
-
-        if (tasks.All(t => t.Status is TaskStatus.Completed or TaskStatus.Failed or TaskStatus.Cancelled))
-        {
-            batch.Status = batch.FailedFiles == 0 ? TaskStatus.Completed : TaskStatus.Failed;
-            batch.CompletedAt = DateTime.UtcNow;
-        }
-        else if (tasks.Any(t => t.Status == TaskStatus.Running))
-        {
-            batch.Status = TaskStatus.Running;
-        }
-
-        db.BatchTasks.Update(batch);
-        return Task.CompletedTask;
+        Db.BatchTasks.DeleteAll();
+        return Task.FromResult(count);
     }
 
-    private void OnTaskProgressChanged(ObjectId taskId, double progress, double? speed, double? eta)
-    {
-        TaskProgressChanged?.Invoke(this, new TaskProgressEventArgs(taskId, progress, speed, eta));
-    }
-
-    private void OnTaskStatusChanged(ObjectId taskId, TaskStatus oldStatus, TaskStatus newStatus, string? errorMessage)
-    {
-        TaskStatusChanged?.Invoke(this, new TaskStatusEventArgs(taskId, oldStatus, newStatus, errorMessage));
-    }
+    public int RecoverOrphanedTasks() => Queue.RecoverOrphanedTasks();
 }

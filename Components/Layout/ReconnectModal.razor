@@ -1,5 +1,10 @@
-﻿<script type="module" src="@Assets["Components/Layout/ReconnectModal.razor.js"]"></script>
+<script type="module" src="@Assets["Components/Layout/ReconnectModal.razor.js"]"></script>
 
+@*
+    连接状态提示。Blazor Server 的整个界面都依赖与服务端的长连接，
+    断开时给出中文说明，并把「重试 / 重新加载」放在明显位置。
+    注意：class 名与 id 必须与 ReconnectModal.razor.js 保持一致，不要改动。
+*@
 <dialog id="components-reconnect-modal" data-nosnippet>
     <div class="components-reconnect-container">
         <div class="components-rejoining-animation" aria-hidden="true">
@@ -7,25 +12,28 @@
             <div></div>
         </div>
         <p class="components-reconnect-first-attempt-visible">
-            Rejoining the server...
+            正在重新连接服务…
         </p>
         <p class="components-reconnect-repeated-attempt-visible">
-            Rejoin failed... trying again in <span id="components-seconds-to-next-attempt"></span> seconds.
+            重新连接失败，将在 <span id="components-seconds-to-next-attempt"></span> 秒后重试。
         </p>
         <p class="components-reconnect-failed-visible">
-            Failed to rejoin.<br />Please retry or reload the page.
+            无法重新连接到服务。<br />请确认本应用仍在运行，然后重试或重新加载页面。
         </p>
         <button id="components-reconnect-button" class="components-reconnect-failed-visible">
-            Retry
+            重试
         </button>
         <p class="components-pause-visible">
-            The session has been paused by the server.
+            会话已被服务端暂停。
         </p>
         <button id="components-resume-button" class="components-pause-visible">
-            Resume
+            恢复会话
         </button>
         <p class="components-resume-failed-visible">
-            Failed to resume the session.<br />Please reload the page.
+            恢复会话失败。<br />请重新加载页面。
+        </p>
+        <p class="components-reconnect-hint">
+            提示：转换任务在服务端后台队列中执行，断线或刷新页面都不会中断正在进行的转换。
         </p>
     </div>
 </dialog>

@@ -1,373 +1,844 @@
-﻿@page "/"
-@using FFmpegWebUI.Models
-@using FFmpegWebUI.Services
-@using FFmpegWebUI.Components.Shared
-@inject IFFmpegService FFmpegService
+@page "/"
+@inject IAppStatusService AppStatusService
 @inject IHardwareDetectionService HardwareDetectionService
+@inject ITaskService TaskService
+@inject IToastService Toast
+@implements IDisposable
 @rendermode InteractiveServer
 
-<PageTitle>首页 - FFmpeg Web UI</PageTitle>
+<PageTitle>首页 - @AppInfo.Name</PageTitle>
 
-<div class="home-container">
-    <h1>🎬 FFmpeg Web UI</h1>
-    <p class="subtitle">本地媒体文件转换工具</p>
+<div class="ffui-container home">
+    <header class="hero">
+        <div class="hero-text">
+            <h1>🎬 @AppInfo.Name</h1>
+            <p class="hero-sub">本地媒体文件转换工具 · v@(AppInfo.Version)</p>
+        </div>
+        <nav class="hero-actions" aria-label="快速开始">
+            <a class="ffui-btn ffui-btn-primary ffui-btn-lg" href="convert">🔄 开始转换</a>
+            <a class="ffui-btn ffui-btn-lg" href="batch">📁 批量处理</a>
+            <a class="ffui-btn ffui-btn-lg" href="templates">📋 模板</a>
+        </nav>
+    </header>
 
-    <section class="status-section">
-        <h2>📊 系统状态</h2>
-        
-        @if (_isLoading)
+    <!-- ── 环境状态 ────────────────────────────────────────────── -->
+    <section class="ffui-panel">
+        <h2 class="ffui-section-title">
+            <span>📊 环境状态</span>
+            @if (_statusLoaded)
+            {
+                <span class="ffui-badge @HealthBadgeClass()">@HealthBadgeText()</span>
+            }
+            <span class="spacer"></span>
+            <button type="button" class="ffui-btn ffui-btn-sm" disabled="@_isLoadingStatus" @onclick="() => LoadAllAsync(forceRefresh: true)">
+                @if (_isLoadingStatus)
+                {
+                    <span class="spinner" aria-hidden="true"></span>
+                }
+                🔄 刷新
+            </button>
+        </h2>
+
+        @if (!_statusLoaded)
         {
-            <div class="loading">
-                <span class="spinner"></span> 正在检测系统环境...
+            <div class="ffui-loading-row">
+                <span class="spinner" aria-hidden="true"></span>
+                <span>正在检测环境…首次检测需要试跑硬件编码器，可能需要几十秒。</span>
+                @if (_elapsedSeconds > 0.05)
+                {
+                    <span class="ffui-badge">已用 @FormatElapsed(_elapsedSeconds)</span>
+                }
             </div>
         }
         else
         {
-            <div class="ffmpeg-status">
-                <h3>FFmpeg 状态</h3>
-                @if (_ffmpegInfo != null)
-                {
-                    <div class="status-card success">
-                        <div class="status-icon">✓</div>
-                        <div class="status-content">
-                            <strong>FFmpeg 已安装</strong>
-                            <p>版本: @_ffmpegInfo.Version</p>
-                            <p>路径: @_ffmpegInfo.Path</p>
-                            <p>支持格式: @_ffmpegInfo.SupportedFormats.Count 种</p>
-                            <p>支持编解码器: @_ffmpegInfo.SupportedCodecs.Count 种</p>
+            @if (!_status.FFmpegAvailable)
+            {
+                <div class="ffui-alert ffui-alert-danger">
+                    <div>
+                        <strong>未检测到可用的 FFmpeg</strong>
+                        <p class="alert-text">@InstallHintText()</p>
+                        <div class="alert-actions">
+                            <a class="ffui-btn ffui-btn-sm ffui-btn-primary" href="settings">前往设置</a>
+                            <a class="ffui-btn ffui-btn-sm" href="https://ffmpeg.org/download.html" target="_blank" rel="noreferrer">下载 FFmpeg</a>
                         </div>
                     </div>
-                }
-                else
-                {
-                    <div class="status-card error">
-                        <div class="status-icon">✗</div>
-                        <div class="status-content">
-                            <strong>FFmpeg 未找到</strong>
-                            <p>请确保 FFmpeg 已安装并添加到系统 PATH，或在设置中指定路径。</p>
-                            <a href="https://ffmpeg.org/download.html" target="_blank">下载 FFmpeg</a>
-                        </div>
+                </div>
+            }
+            else
+            {
+                <div class="ffui-alert ffui-alert-success">
+                    <div>
+                        <strong>FFmpeg 已就绪 · @_status.FFmpegVersion</strong>
+                        <p class="alert-text mono">@OrDash(_status.FFmpegPath)</p>
                     </div>
-                }
-            </div>
+                </div>
+            }
+
+            <dl class="status-grid">
+                <div class="status-item">
+                    <dt>FFmpeg 版本</dt>
+                    <dd>@OrDash(_status.FFmpegVersion)</dd>
+                </div>
+                <div class="status-item">
+                    <dt>FFmpeg 路径</dt>
+                    <dd class="mono ellipsis" title="@_status.FFmpegPath">@OrDash(_status.FFmpegPath)</dd>
+                </div>
+                <div class="status-item">
+                    <dt>路径来源</dt>
+                    <dd><span class="ffui-badge">@PathSourceText()</span></dd>
+                </div>
+                <div class="status-item">
+                    <dt>平台</dt>
+                    <dd>@OrDash(_status.Platform)</dd>
+                </div>
+                <div class="status-item">
+                    <dt>.NET 版本</dt>
+                    <dd>@OrDash(_status.Runtime)</dd>
+                </div>
+                <div class="status-item">
+                    <dt>数据目录</dt>
+                    <dd class="mono ellipsis" title="@_status.DataDirectory">@OrDash(_status.DataDirectory)</dd>
+                    <dd><span class="ffui-badge @DataDirBadgeClass()">@DataDirBadgeText()</span></dd>
+                </div>
+                <div class="status-item">
+                    <dt>硬件解码方式</dt>
+                    <dd>
+                        @if (_status.Hwaccels.Count == 0)
+                        {
+                            <span class="muted">未检测到（FFmpeg 未启用或不可用）</span>
+                        }
+                        else
+                        {
+                            <span class="chip-row">
+                                @foreach (var hwaccel in _status.Hwaccels)
+                                {
+                                    <code class="chip" @key="hwaccel">@hwaccel</code>
+                                }
+                            </span>
+                        }
+                    </dd>
+                </div>
+                <div class="status-item">
+                    <dt>模板数量</dt>
+                    <dd>@_status.TemplateCount 个 · <a href="templates">管理模板</a></dd>
+                </div>
+                <div class="status-item">
+                    <dt>任务队列</dt>
+                    <dd>
+                        运行中 @TaskService.ActiveCount 个 · 排队 @TaskService.QueuedCount 个 ·
+                        <a href="tasks">查看任务</a>
+                    </dd>
+                </div>
+            </dl>
+
+            @if (_status.Notices.Count > 0)
+            {
+                <div class="notice-list">
+                    @foreach (var notice in _status.Notices)
+                    {
+                        <div class="ffui-alert @NoticeAlertClass()" @key="notice">
+                            <span>@notice</span>
+                        </div>
+                    }
+                </div>
+            }
         }
     </section>
 
-    <section class="encoders-section">
-        <div class="section-header">
-            <h2>🖥️ 硬件编码器</h2>
-            <button class="refresh-btn" @onclick="RefreshEncoders" disabled="@_isRefreshing">
-                @if (_isRefreshing)
+    <!-- ── 硬件编码能力 ────────────────────────────────────────── -->
+    <section class="ffui-panel">
+        <h2 class="ffui-section-title">
+            <span>🖥️ 硬件编码能力</span>
+            @if (_reportLoaded)
+            {
+                <span class="ffui-badge @ReportBadgeClass()">@ReportBadgeText()</span>
+            }
+            <span class="spacer"></span>
+            <button type="button" class="ffui-btn ffui-btn-sm" disabled="@_isDetecting" @onclick="DetectEncodersAsync">
+                @if (_isDetecting)
                 {
-                    <span class="spinner-small"></span>
+                    <span class="spinner" aria-hidden="true"></span>
                 }
-                else
-                {
-                    <span>🔄</span>
-                }
-                刷新检测
+                @DetectButtonText()
             </button>
-        </div>
+        </h2>
 
-        @if (_lastDetectionTime.HasValue)
+        @if (_isDetecting)
         {
-            <p class="last-detection">上次检测: @_lastDetectionTime.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</p>
+            <div class="ffui-loading-row">
+                <span class="spinner" aria-hidden="true"></span>
+                <span>正在逐个试跑硬件编码器，<strong>可能需要数秒到一分钟</strong>，请不要关闭页面。</span>
+                <span class="ffui-badge">已用 @FormatElapsed(_elapsedSeconds)</span>
+            </div>
         }
 
-        @if (_encoders.Count > 0)
+        @if (!string.IsNullOrEmpty(_detectNote))
         {
-            <div class="encoders-summary">
-                <span class="summary-item available">✓ @_encoders.Count(e => e.IsAvailable) 个可用</span>
-                <span class="summary-item unavailable">✗ @_encoders.Count(e => !e.IsAvailable) 个不可用</span>
-            </div>
+            <div class="ffui-alert ffui-alert-warning"><span>@_detectNote</span></div>
+        }
 
-            <h3>硬件加速编码器</h3>
-            <div class="encoders-grid">
-                @foreach (var encoder in _encoders.Where(e => e.Type != EncoderType.Software))
+        @if (!_reportLoaded)
+        {
+            <div class="ffui-empty-state">
+                还没有检测结果。点击「刷新检测（可能需要数秒）」扫描本机可用的硬件编码器。
+            </div>
+        }
+        else
+        {
+            <p class="report-summary">@OrDash(_report.Summary)</p>
+
+            <div class="report-meta">
+                <span class="ffui-badge">FFmpeg @OrDash(_report.FFmpegVersion)</span>
+                <span class="ffui-badge">检测时间 @_report.DetectedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                <span class="ffui-badge">硬件解码 @_report.Hwaccels.Count 种</span>
+                @if (_lastDetectSeconds > 0.05)
                 {
-                    <EncoderCard Encoder="encoder" />
+                    <span class="ffui-badge">本轮用时 @FormatElapsed(_lastDetectSeconds)</span>
                 }
             </div>
 
-            <h3>软件编码器</h3>
-            <div class="encoders-grid">
-                @foreach (var encoder in _encoders.Where(e => e.Type == EncoderType.Software))
+            <h3 class="sub-title">
+                <span>硬件编码器</span>
+                <span class="ffui-badge">@_hardwareAvailable.Count 个可用 / 共探测 @_hardwareTotal 个</span>
+            </h3>
+
+            @if (_hardwareAvailable.Count == 0)
+            {
+                <div class="ffui-empty-state">
+                    没有可用的硬件编码器，转换会自动使用软件编码（CPU）：速度慢一些，但结果稳定。
+                    如果本机确实有独立显卡或核显，请确认当前的 FFmpeg 构建启用了对应加速（NVENC / VideoToolbox / QSV / VA-API 等）。
+                </div>
+            }
+            else
+            {
+                <div class="encoder-grid">
+                    @foreach (var encoder in _hardwareAvailable)
+                    {
+                        <EncoderCard @key="encoder.Name" Encoder="encoder" />
+                    }
+                </div>
+            }
+
+            @if (_hardwareUnavailable.Count > 0)
+            {
+                <details class="encoder-details">
+                    <summary>另有 @_hardwareUnavailable.Count 个硬件编码器不可用（点开查看原因）</summary>
+                    <ul class="reason-list">
+                        @foreach (var encoder in _hardwareUnavailable)
+                        {
+                            <li @key="encoder.Name">
+                                <code>@encoder.Name</code>
+                                <span class="reason">@UnavailableReason(encoder)</span>
+                            </li>
+                        }
+                    </ul>
+                </details>
+            }
+
+            <details class="encoder-details software">
+                <summary>软件编码（CPU 兜底）· @_softwareAvailable.Count 个可用</summary>
+                @if (_softwareAvailable.Count == 0)
                 {
-                    <EncoderCard Encoder="encoder" />
+                    <p class="muted">当前 FFmpeg 构建里没有检测到软件编码器。</p>
                 }
-            </div>
-        }
-        else if (!_isLoading)
-        {
-            <p class="no-encoders">未检测到编码器，请确保 FFmpeg 已正确安装。</p>
+                else
+                {
+                    <div class="encoder-grid">
+                        @foreach (var encoder in _softwareAvailable)
+                        {
+                            <EncoderCard @key="encoder.Name" Encoder="encoder" />
+                        }
+                    </div>
+                }
+                @if (_softwareUnavailable.Count > 0)
+                {
+                    <ul class="reason-list">
+                        @foreach (var encoder in _softwareUnavailable)
+                        {
+                            <li @key="encoder.Name">
+                                <code>@encoder.Name</code>
+                                <span class="reason">@UnavailableReason(encoder)</span>
+                            </li>
+                        }
+                    </ul>
+                }
+            </details>
         }
     </section>
 
-    <section class="quick-start">
-        <h2>🚀 快速开始</h2>
-        <div class="quick-links">
-            <a href="/convert" class="quick-link">
-                <span class="quick-icon">🔄</span>
-                <span class="quick-text">开始转换</span>
-            </a>
-            <a href="/templates" class="quick-link">
-                <span class="quick-icon">📋</span>
-                <span class="quick-text">管理模板</span>
-            </a>
-            <a href="/batch" class="quick-link">
-                <span class="quick-icon">📁</span>
-                <span class="quick-text">批量处理</span>
-            </a>
-        </div>
+    <!-- ── 最近任务 ────────────────────────────────────────────── -->
+    <section class="ffui-panel">
+        <h2 class="ffui-section-title">
+            <span>🕒 最近任务</span>
+            <span class="spacer"></span>
+            <a class="ffui-btn ffui-btn-sm" href="tasks">查看全部任务</a>
+        </h2>
+
+        @if (_recentTasks.Count == 0)
+        {
+            <div class="ffui-empty-state">
+                还没有任何任务，去「转换」页开始第一个吧。
+                <div class="empty-actions">
+                    <a class="ffui-btn ffui-btn-primary ffui-btn-sm" href="convert">开始转换</a>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="table-scroll">
+                <table class="recent-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">文件</th>
+                            <th scope="col">状态</th>
+                            <th scope="col">耗时</th>
+                            <th scope="col">创建时间</th>
+                            <th scope="col">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var task in _recentTasks)
+                        {
+                            <tr @key="task.Id">
+                                <td class="ellipsis" title="@task.InputPath">@Path.GetFileName(task.InputPath)</td>
+                                <td>
+                                    <span class="ffui-badge @StatusBadgeClass(task.Status)">@StatusText(task.Status)</span>
+                                </td>
+                                <td>@FormatDuration(task)</td>
+                                <td>@task.CreatedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
+                                <td>
+                                    @if (task.Status == TaskStatus.Completed)
+                                    {
+                                        <button type="button" class="ffui-btn ffui-btn-sm" @onclick="() => OpenOutputFolderAsync(task)">打开目录</button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
     </section>
 </div>
 
-@code {
-    private FFmpegInfo? _ffmpegInfo;
-    private List<HardwareEncoder> _encoders = [];
-    private bool _isLoading = true;
-    private bool _isRefreshing;
-    private DateTime? _lastDetectionTime;
-
-    protected override async Task OnInitializedAsync()
-    {
-        await LoadSystemStatus();
-    }
-
-    private async Task LoadSystemStatus()
-    {
-        _isLoading = true;
-        StateHasChanged();
-
-        try
-        {
-            _ffmpegInfo = await FFmpegService.GetFFmpegInfoAsync();
-
-            if (_ffmpegInfo != null)
-            {
-                _encoders = await HardwareDetectionService.DetectEncodersAsync();
-                _lastDetectionTime = HardwareDetectionService.LastDetectionTime;
-            }
-        }
-        finally
-        {
-            _isLoading = false;
-            StateHasChanged();
-        }
-    }
-
-    private async Task RefreshEncoders()
-    {
-        _isRefreshing = true;
-        StateHasChanged();
-
-        try
-        {
-            _encoders = await HardwareDetectionService.DetectEncodersAsync(forceRefresh: true);
-            _lastDetectionTime = HardwareDetectionService.LastDetectionTime;
-        }
-        finally
-        {
-            _isRefreshing = false;
-            StateHasChanged();
-        }
-    }
-}
-
 <style>
-    .home-container {
-        max-width: 1200px;
-        margin: 0 auto;
-    }
-
-    h1 {
-        color: #333;
-        margin-bottom: 0.25rem;
-    }
-
-    .subtitle {
-        color: #666;
-        font-size: 1.1rem;
-        margin-bottom: 2rem;
-    }
-
-    section {
-        margin-bottom: 2rem;
-        padding: 1.5rem;
-        background: #f8f9fa;
-        border-radius: 8px;
-    }
-
-    h2 {
-        margin-top: 0;
-        margin-bottom: 1rem;
-        color: #333;
-    }
-
-    h3 {
-        margin-top: 1.5rem;
-        margin-bottom: 1rem;
-        color: #555;
-        font-size: 1rem;
-    }
-
-    .loading {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        color: #666;
-    }
-
-    .spinner {
-        width: 20px;
-        height: 20px;
-        border: 2px solid #ddd;
-        border-top-color: #007bff;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-    }
-
-    .spinner-small {
-        width: 14px;
-        height: 14px;
-        border: 2px solid #ddd;
-        border-top-color: #007bff;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-        display: inline-block;
-    }
-
-    @@keyframes spin {
-        to { transform: rotate(360deg); }
-    }
-
-    .status-card {
-        display: flex;
-        gap: 1rem;
-        padding: 1rem;
-        border-radius: 8px;
-        background: white;
-    }
-
-    .status-card.success {
-        border-left: 4px solid #28a745;
-    }
-
-    .status-card.error {
-        border-left: 4px solid #dc3545;
-    }
-
-    .status-icon {
-        font-size: 2rem;
-    }
-
-    .status-content p {
-        margin: 0.25rem 0;
-        color: #666;
-        font-size: 0.9rem;
-    }
-
-    .section-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1rem;
-    }
-
-    .section-header h2 {
-        margin: 0;
-    }
-
-    .refresh-btn {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem 1rem;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        background: white;
-        cursor: pointer;
-        font-size: 0.9rem;
-    }
-
-    .refresh-btn:hover:not(:disabled) {
-        background: #f0f0f0;
-    }
-
-    .refresh-btn:disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
-    }
-
-    .last-detection {
-        font-size: 0.85rem;
-        color: #888;
-        margin-bottom: 1rem;
-    }
-
-    .encoders-summary {
-        display: flex;
-        gap: 1rem;
-        margin-bottom: 1rem;
-    }
-
-    .summary-item {
-        padding: 0.25rem 0.75rem;
-        border-radius: 4px;
-        font-size: 0.9rem;
-    }
-
-    .summary-item.available {
-        background: #d4edda;
-        color: #155724;
-    }
-
-    .summary-item.unavailable {
-        background: #f8d7da;
-        color: #721c24;
-    }
-
-    .encoders-grid {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem;
-    }
-
-    .no-encoders {
-        color: #666;
-        font-style: italic;
-    }
-
-    .quick-links {
-        display: flex;
-        gap: 1rem;
-        flex-wrap: wrap;
-    }
-
-    .quick-link {
+    .home {
         display: flex;
         flex-direction: column;
+        gap: 1.25rem;
+    }
+
+    .hero {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
         align-items: center;
-        padding: 1.5rem 2rem;
-        background: white;
-        border-radius: 8px;
-        text-decoration: none;
-        color: #333;
-        transition: transform 0.2s, box-shadow 0.2s;
-        min-width: 120px;
+        justify-content: space-between;
     }
 
-    .quick-link:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    .hero-text h1 { margin: 0; }
+
+    .hero-sub {
+        margin: 0.25rem 0 0;
+        color: var(--text-secondary);
     }
 
-    .quick-icon {
-        font-size: 2rem;
-        margin-bottom: 0.5rem;
+    .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
     }
 
-    .quick-text {
-        font-weight: 500;
+    .ffui-panel { margin: 0; }
+
+    .spacer { flex: 1; }
+
+    .alert-text {
+        margin: 0.35rem 0 0;
+        word-break: break-all;
+    }
+
+    .alert-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-top: 0.6rem;
+    }
+
+    .status-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 0.85rem 1.25rem;
+        margin: 1rem 0 0;
+    }
+
+    .status-item {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+        min-width: 0;
+    }
+
+    .status-item dt {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+    }
+
+    .status-item dd {
+        margin: 0;
+        font-size: 0.92rem;
+        color: var(--text-primary);
+        min-width: 0;
+    }
+
+    .chip-row {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 0.3rem;
+    }
+
+    .chip { font-size: 0.78rem; }
+
+    .mono { font-family: var(--font-mono); }
+
+    .ellipsis {
+        display: inline-block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        vertical-align: bottom;
+    }
+
+    .muted { color: var(--text-muted); }
+
+    .notice-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        margin-top: 0.9rem;
+    }
+
+    .report-summary {
+        margin: 0.35rem 0 0.7rem;
+        color: var(--text-secondary);
+    }
+
+    .report-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-bottom: 1rem;
+    }
+
+    .sub-title {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin: 1rem 0 0.6rem;
+        font-size: 1rem;
+        color: var(--text-primary);
+    }
+
+    .encoder-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 0.6rem;
+    }
+
+    .encoder-details {
+        margin-top: 0.9rem;
+        padding: 0.6rem 0.8rem;
+        background: var(--surface-3);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+    }
+
+    .encoder-details.software { background: transparent; }
+
+    .encoder-details > summary {
+        cursor: pointer;
+        color: var(--text-secondary);
+        font-size: 0.9rem;
+    }
+
+    .reason-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+        margin: 0.6rem 0 0;
+        padding: 0;
+        list-style: none;
+    }
+
+    .reason-list li {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: baseline;
+        font-size: 0.85rem;
+    }
+
+    .reason { color: var(--text-muted); }
+
+    .table-scroll { overflow-x: auto; }
+
+    .recent-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    .recent-table th,
+    .recent-table td {
+        padding: 0.6rem 0.7rem;
+        text-align: left;
+        border-bottom: 1px solid var(--border-color);
+        font-size: 0.9rem;
+    }
+
+    .recent-table th {
+        background: var(--surface-3);
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        font-weight: 600;
+    }
+
+    .recent-table tbody tr:last-child td { border-bottom: none; }
+
+    .empty-actions {
+        display: flex;
+        justify-content: center;
+        gap: 0.5rem;
+        margin-top: 0.7rem;
     }
 </style>
+
+@code {
+    private AppStatus _status = new();
+    private HardwareDetectionReport _report = new();
+    private List<ConversionTask> _recentTasks = [];
+
+    private List<HardwareEncoder> _hardwareAvailable = [];
+    private List<HardwareEncoder> _hardwareUnavailable = [];
+    private List<HardwareEncoder> _softwareAvailable = [];
+    private List<HardwareEncoder> _softwareUnavailable = [];
+    private int _hardwareTotal;
+
+    private bool _statusLoaded;
+    private bool _reportLoaded;
+    private bool _isLoadingStatus;
+    private bool _isDetecting;
+    private bool _initialized;
+
+    private double _elapsedSeconds;
+    private double _lastDetectSeconds;
+    private string _detectNote = string.Empty;
+    private DateTime _scanStartedAt;
+
+    private CancellationTokenSource? _tickerCts;
+    private Task? _tickerLoop;
+    private volatile bool _disposed;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // 环境检测会真的去试跑编码器（可能几十秒），放在预渲染里会卡住整个首屏，
+        // 所以等到交互式渲染后再加载，预渲染阶段先显示占位的加载提示。
+        if (!firstRender || _initialized) return;
+        _initialized = true;
+        await LoadAllAsync(forceRefresh: false);
+    }
+
+    // ── 数据加载 ────────────────────────────────────────────────
+
+    /// <summary>读取环境状态 + 硬件检测报告 + 最近任务</summary>
+    private async Task LoadAllAsync(bool forceRefresh)
+    {
+        if (_isLoadingStatus || _isDetecting) return;
+
+        _isLoadingStatus = true;
+        _detectNote = string.Empty;
+        StartTicker();
+
+        try
+        {
+            var status = await AppStatusService.GetStatusAsync(forceRefresh);
+            _status = status;
+            _statusLoaded = true;
+
+            if (status.FFmpegAvailable)
+            {
+                // GetStatusAsync 内部已经按 forceRefresh 跑过一次检测（并写入缓存），
+                // 这里不再强制刷新，否则点一次「刷新」会先后试跑两遍编码器。
+                _report = await HardwareDetectionService.DetectAsync();
+                _reportLoaded = true;
+                _lastDetectSeconds = _elapsedSeconds;
+            }
+            else if (HardwareDetectionService.LastReport is { } lastReport)
+            {
+                _report = lastReport;
+                _reportLoaded = true;
+            }
+
+            RebuildEncoderGroups();
+            _recentTasks = await TaskService.GetTaskHistoryAsync(5);
+
+            if (forceRefresh) Toast.Success("环境状态已刷新。");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"读取环境状态失败：{ex.Message}（可以稍后重试，或先到「设置」检查 FFmpeg 路径）");
+        }
+        finally
+        {
+            _isLoadingStatus = false;
+            await StopTickerAsync();
+            await RenderAsync();
+        }
+    }
+
+    /// <summary>只重跑硬件检测（按钮路径：需要明确的忙碌反馈 + 耗时显示）</summary>
+    private async Task DetectEncodersAsync()
+    {
+        if (_isDetecting || _isLoadingStatus) return;
+
+        _isDetecting = true;
+        _detectNote = string.Empty;
+        StartTicker();
+
+        try
+        {
+            _report = await HardwareDetectionService.DetectAsync(forceRefresh: true);
+            _reportLoaded = true;
+            _lastDetectSeconds = _elapsedSeconds;
+
+            // 检测内存缓存已更新，这里再读一次状态不会重复扫描，只是让计数与提示跟着刷新
+            _status = await AppStatusService.GetStatusAsync(forceRefresh: false);
+            _statusLoaded = true;
+
+            RebuildEncoderGroups();
+
+            Toast.Success($"硬件检测完成，用时 {FormatElapsed(_lastDetectSeconds)}。");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"硬件检测失败：{ex.Message}（可以稍后重试；转换会自动改用软件编码）");
+        }
+        finally
+        {
+            _isDetecting = false;
+            await StopTickerAsync();
+            await RenderAsync();
+        }
+    }
+
+    private void RebuildEncoderGroups()
+    {
+        _hardwareTotal = _report.Encoders.Count(e => e.IsHardware);
+        _hardwareAvailable = _report.Encoders.Where(e => e.IsHardware && e.IsAvailable).ToList();
+        _hardwareUnavailable = _report.Encoders.Where(e => e.IsHardware && !e.IsAvailable).ToList();
+        _softwareAvailable = _report.Encoders.Where(e => !e.IsHardware && e.IsAvailable).ToList();
+        _softwareUnavailable = _report.Encoders.Where(e => !e.IsHardware && !e.IsAvailable).ToList();
+    }
+
+    // ── 扫描计时（检测可能很慢，必须有进度感）──────────────────
+
+    private void StartTicker()
+    {
+        _scanStartedAt = DateTime.UtcNow;
+        _elapsedSeconds = 0;
+
+        var cts = new CancellationTokenSource();
+        _tickerCts = cts;
+        _tickerLoop = RunTickerAsync(cts.Token);
+    }
+
+    private async Task StopTickerAsync()
+    {
+        var cts = _tickerCts;
+        var loop = _tickerLoop;
+        _tickerCts = null;
+        _tickerLoop = null;
+
+        if (cts == null) return;
+
+        cts.Cancel();
+        if (loop != null)
+        {
+            try
+            {
+                await loop;
+            }
+            catch (Exception ex)
+            {
+                if (!_disposed) _detectNote = $"耗时显示异常：{ex.Message}";
+            }
+        }
+        cts.Dispose();
+    }
+
+    private async Task RunTickerAsync(CancellationToken token)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(200));
+
+        while (!token.IsCancellationRequested && !_disposed)
+        {
+            await timer.WaitForNextTickAsync();
+            if (token.IsCancellationRequested || _disposed) return;
+
+            var elapsed = (DateTime.UtcNow - _scanStartedAt).TotalSeconds;
+            try
+            {
+                await InvokeAsync(() =>
+                {
+                    _elapsedSeconds = elapsed;
+                    StateHasChanged();
+                });
+            }
+            catch (Exception ex)
+            {
+                // 组件已销毁就没有界面可提示；其它异常要让用户看到计时已停
+                if (!_disposed) _detectNote = $"耗时显示不可用：{ex.Message}";
+                return;
+            }
+        }
+    }
+
+    private async Task RenderAsync()
+    {
+        if (_disposed) return;
+        try
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            // 组件已销毁无需提示，其它异常必须让用户看到
+            if (!_disposed) Toast.Warning($"界面刷新失败：{ex.Message}");
+        }
+    }
+
+    // ── 动作 ────────────────────────────────────────────────────
+
+    private async Task OpenOutputFolderAsync(ConversionTask task)
+    {
+        try
+        {
+            var directory = string.IsNullOrWhiteSpace(task.OutputPath) ? null : Path.GetDirectoryName(task.OutputPath);
+            if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+            {
+                Toast.Warning("输出目录不存在，可能已被移动或删除。");
+                return;
+            }
+
+            if (AppPaths.IsWindows)
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{directory}\"") { UseShellExecute = true });
+            }
+            else if (AppPaths.IsMacOS)
+            {
+                System.Diagnostics.Process.Start("open", [directory]);
+            }
+            else
+            {
+                System.Diagnostics.Process.Start("xdg-open", [directory]);
+            }
+
+            Toast.Success("已在文件管理器中打开输出目录。");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"无法打开目录：{ex.Message}");
+        }
+
+        await Task.CompletedTask;
+    }
+
+    // ── 展示辅助 ────────────────────────────────────────────────
+
+    private string HealthBadgeClass() => _status.FFmpegAvailable ? "ffui-badge-success" : "ffui-badge-danger";
+
+    private string HealthBadgeText() => _status.FFmpegAvailable ? "环境正常" : "FFmpeg 不可用";
+
+    private string NoticeAlertClass() => _status.FFmpegAvailable ? "ffui-alert-warning" : "ffui-alert-danger";
+
+    private string PathSourceText() => _status.AutoDetected ? "自动探测" : "设置中指定";
+
+    private string DataDirBadgeClass() => AppStatusService.IsDataDirectoryWritable ? "ffui-badge-success" : "ffui-badge-warning";
+
+    private string DataDirBadgeText() => AppStatusService.IsDataDirectoryWritable ? "可写" : "不可写（设置无法保存）";
+
+    private string ReportBadgeClass() => _report.HasHardwareAcceleration ? "ffui-badge-success" : "ffui-badge-warning";
+
+    private string ReportBadgeText() => _report.HasHardwareAcceleration
+        ? $"{_hardwareAvailable.Count} 个硬件编码器可用"
+        : "没有可用的硬件编码器";
+
+    private string DetectButtonText() => _isDetecting ? "正在检测…" : "🔄 刷新检测（可能需要数秒）";
+
+    private string InstallHintText() => AppPaths.IsWindows
+        ? "请先安装 FFmpeg：从 ffmpeg.org 下载压缩包后解压，把 bin 目录加入 PATH（或执行 winget install Gyan.FFmpeg），也可以在「设置」里直接指定 ffmpeg.exe 的完整路径。"
+        : AppPaths.IsMacOS
+            ? "请先安装 FFmpeg：在终端执行 brew install ffmpeg（或从 ffmpeg.org 下载静态包），也可以在「设置」里直接指定 ffmpeg 的完整路径。"
+            : "请先安装 FFmpeg：Debian/Ubuntu 用 apt install ffmpeg，Fedora 用 dnf install ffmpeg，也可以在「设置」里直接指定 ffmpeg 的完整路径。";
+
+    private static string UnavailableReason(HardwareEncoder encoder) =>
+        string.IsNullOrWhiteSpace(encoder.UnavailableReason) ? "未通过可用性试跑" : encoder.UnavailableReason!;
+
+    private static string OrDash(string? value) => string.IsNullOrWhiteSpace(value) ? "—" : value;
+
+    private static string FormatElapsed(double seconds)
+    {
+        if (seconds < 0) seconds = 0;
+        if (seconds >= 60)
+        {
+            return TimeSpan.FromSeconds(seconds).ToString(@"m\:ss");
+        }
+        return seconds.ToString("0.0", CultureInfo.InvariantCulture) + " 秒";
+    }
+
+    private static string FormatDuration(ConversionTask task) =>
+        task.DurationSeconds is double seconds ? FormatSeconds(seconds) : "-";
+
+    private static string FormatSeconds(double seconds)
+    {
+        if (seconds <= 0) return "-";
+        var span = TimeSpan.FromSeconds(seconds);
+        return span.TotalHours >= 1
+            ? $"{(int)span.TotalHours}:{span.Minutes:D2}:{span.Seconds:D2}"
+            : $"{span.Minutes:D2}:{span.Seconds:D2}";
+    }
+
+    private static string StatusText(TaskStatus status) => status switch
+    {
+        TaskStatus.Completed => "已完成",
+        TaskStatus.Failed => "失败",
+        TaskStatus.Running => "运行中",
+        TaskStatus.Cancelled => "已取消",
+        TaskStatus.Skipped => "已跳过",
+        _ => "等待中"
+    };
+
+    private static string StatusBadgeClass(TaskStatus status) => status switch
+    {
+        TaskStatus.Completed => "ffui-badge-success",
+        TaskStatus.Failed => "ffui-badge-danger",
+        TaskStatus.Running => "ffui-badge-info",
+        TaskStatus.Cancelled => "ffui-badge-warning",
+        TaskStatus.Skipped => "ffui-badge-warning",
+        _ => string.Empty
+    };
+
+    public void Dispose()
+    {
+        _disposed = true;
+
+        var cts = _tickerCts;
+        _tickerCts = null;
+        _tickerLoop = null;
+
+        if (cts == null) return;
+        cts.Cancel();
+        cts.Dispose();
+    }
+}

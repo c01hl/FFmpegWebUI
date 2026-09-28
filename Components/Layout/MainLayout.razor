@@ -1,36 +1,137 @@
-﻿@inherits LayoutComponentBase
+@inherits LayoutComponentBase
 @using FFmpegWebUI.Services
 @inject ISettingsService SettingsService
+@inject IJSRuntime JS
+@inject ITaskService TaskService
+@implements IDisposable
 
-<div class="page" data-theme="@_theme">
+<PageTitle>@AppInfo.Name</PageTitle>
+
+<div class="page">
     <div class="sidebar">
         <NavMenu />
     </div>
 
     <main>
-        <div class="top-row px-4">
-            <span class="app-title">FFmpeg Web UI</span>
-            <span class="version">v1.0</span>
+        <div class="top-row">
+            <span class="app-title">🎬 @AppInfo.Name</span>
+            <span class="app-version ffui-badge">v@(AppInfo.Version)</span>
+            <span class="top-spacer"></span>
+            @if (_activeCount > 0 || _queuedCount > 0)
+            {
+                <a class="top-running" href="tasks" title="查看任务列表">
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span>@_activeCount 个转换进行中@(_queuedCount > 0 ? $"（{_queuedCount} 个排队）" : "")</span>
+                </a>
+            }
         </div>
 
-        <article class="content px-4">
+        <article class="content">
             @Body
         </article>
     </main>
 </div>
 
-<div id="blazor-error-ui" data-nosnippet>
-    发生了未处理的错误。
-    <a href="." class="reload">重新加载</a>
-    <span class="dismiss">🗙</span>
-</div>
+<ToastHost />
 
 @code {
-    private string _theme = "System";
+    private int _activeCount;
+    private int _queuedCount;
 
     protected override async Task OnInitializedAsync()
     {
-        var settings = await SettingsService.GetSettingsAsync();
-        _theme = settings.Theme;
+        try
+        {
+            var settings = await SettingsService.GetSettingsAsync();
+            await JS.InvokeVoidAsync("ffui.applyTheme", settings.Theme);
+            await WriteThemeCookieAsync(settings.Theme);
+        }
+        catch (Exception)
+        {
+            // JS 互操作在预渲染阶段可能不可用，忽略即可（App.razor 已经设置了初始主题）
+        }
+
+        TaskService.TaskStatusChanged += OnTaskStatusChanged;
+        RefreshCounters();
+    }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender) RefreshCounters();
+    }
+
+    private void OnTaskStatusChanged(object? sender, FFmpegWebUI.Models.TaskStatusEventArgs e)
+    {
+        RefreshCounters();
+        _ = InvokeAsync(StateHasChanged);
+
+        // 任务结束时发送浏览器通知。放在 MainLayout 是因为它始终挂载，
+        // 这样不管用户当前停在哪个页面都能收到提醒。
+        if (e.NewStatus is FFmpegWebUI.Models.TaskStatus.Completed
+            or FFmpegWebUI.Models.TaskStatus.Failed
+            or FFmpegWebUI.Models.TaskStatus.Cancelled
+            or FFmpegWebUI.Models.TaskStatus.Skipped)
+        {
+            _ = NotifyCompletionAsync(e);
+        }
+    }
+
+    private async Task NotifyCompletionAsync(FFmpegWebUI.Models.TaskStatusEventArgs e)
+    {
+        try
+        {
+            var settings = await SettingsService.GetSettingsAsync();
+            if (!settings.NotifyOnCompletion) return;
+
+            var task = await TaskService.GetTaskByIdAsync(e.TaskId);
+            var name = task is null ? "任务" : Path.GetFileName(task.InputPath);
+
+            var (title, body) = e.NewStatus switch
+            {
+                FFmpegWebUI.Models.TaskStatus.Completed => ("✅ 转换完成", name),
+                FFmpegWebUI.Models.TaskStatus.Failed => ("❌ 转换失败", $"{name}\n{e.ErrorMessage}"),
+                FFmpegWebUI.Models.TaskStatus.Cancelled => ("已取消", name),
+                _ => ("已跳过", name)
+            };
+
+            await JS.InvokeAsync<bool>("ffui.notify", title, body ?? string.Empty);
+        }
+        catch
+        {
+            // 浏览器可能未授权或被策略拦截，通知失败不影响其它功能
+        }
+    }
+
+    private void RefreshCounters()
+    {
+        try
+        {
+            _activeCount = TaskService.ActiveCount;
+            _queuedCount = TaskService.QueuedCount;
+        }
+        catch
+        {
+            // 服务未就绪时忽略
+        }
+    }
+
+    /// <summary>把主题写进 Cookie，让服务端渲染的首屏就能用对颜色</summary>
+    private async Task WriteThemeCookieAsync(string theme)
+    {
+        try
+        {
+            var safe = Uri.EscapeDataString(theme ?? "System");
+            await JS.InvokeVoidAsync("eval",
+                $"document.cookie='ffui-theme={safe};path=/;max-age=31536000;SameSite=Lax'");
+        }
+        catch
+        {
+            // 无法写 Cookie 时不影响功能
+        }
+    }
+
+    public void Dispose()
+    {
+        TaskService.TaskStatusChanged -= OnTaskStatusChanged;
     }
 }

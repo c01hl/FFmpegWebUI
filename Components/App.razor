@@ -1,9 +1,12 @@
-﻿<!DOCTYPE html>
-<html lang="en">
+<!DOCTYPE html>
+@using FFmpegWebUI.Services
+<html lang="zh-CN" data-theme-mode="@(_theme ?? "System")" data-theme="@(_theme == "Dark" ? "Dark" : _theme == "Light" ? "Light" : "Light")">
 
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="FFmpeg WebUI — 本机 FFmpeg 图形界面，支持跨平台硬件编码加速" />
     <base href="/" />
     <ResourcePreloader />
     <link rel="stylesheet" href="@Assets["lib/bootstrap/dist/css/bootstrap.min.css"]" />
@@ -12,12 +15,30 @@
     <ImportMap />
     <link rel="icon" type="image/png" href="favicon.png" />
     <HeadOutlet />
+    <script src="@Assets["js/app.js"]"></script>
 </head>
 
 <body>
     <Routes />
     <ReconnectModal />
+    <div id="blazor-error-ui" data-nosnippet>
+        页面发生了未处理的错误。
+        <a href="." class="reload">重新加载</a>
+        <span class="dismiss" role="button" tabindex="0">🗙</span>
+    </div>
     <script src="@Assets["_framework/blazor.web.js"]"></script>
 </body>
 
 </html>
+
+@code {
+    private string? _theme;
+
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+
+    protected override void OnInitialized()
+    {
+        // 首屏就把主题写进 <html>，避免深色系统下出现白色闪屏
+        _theme = HttpContext?.Request.Cookies["ffui-theme"];
+    }
+}

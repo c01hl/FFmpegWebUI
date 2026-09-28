@@ -1,50 +1,74 @@
 @page "/batch"
-@using FFmpegWebUI.Models
-@using FFmpegWebUI.Services
-@using FFmpegWebUI.Components.Shared
-@using TaskStatus = FFmpegWebUI.Models.TaskStatus
+@using LiteDB
 @inject ITaskService TaskService
 @inject ITemplateService TemplateService
 @inject IFileService FileService
 @inject ISettingsService SettingsService
+@inject IToastService Toast
 @rendermode InteractiveServer
+@implements IDisposable
 
-<PageTitle>批量处理 - FFmpeg Web UI</PageTitle>
+<PageTitle>批量处理 - @AppInfo.Name</PageTitle>
 
-<div class="batch-container">
-    <h1>📁 批量处理</h1>
-
-    <div class="batch-layout">
-        <div class="left-panel">
-            <div class="file-section">
-                <BatchFileList @bind-Files="_files"
-                               FileStatuses="_fileStatuses"
-                               IsProcessing="_isProcessing" />
-            </div>
-
-            <div class="output-section">
-                <h3>输出设置</h3>
-                <FileSelector Label="输出目录"
-                              @bind-Value="_outputDirectory"
-                              Placeholder="选择输出目录"
-                              IsDirectory="true"
-                              ValidateExists="false" />
-            </div>
-        </div>
-
-        <div class="right-panel">
-            <div class="template-section">
-                <TemplateSelector @bind-SelectedTemplate="_selectedTemplate" />
-            </div>
-        </div>
+<div class="ffui-container">
+    <div class="page-head">
+        <h1>📁 批量处理</h1>
+        @if (_settings is { MaxConcurrentTasks: > 1 })
+        {
+            <span class="ffui-badge ffui-badge-info">并发 @_settings.MaxConcurrentTasks 个任务</span>
+        }
     </div>
 
-    <div class="action-section">
-        <button class="btn-primary" @onclick="StartBatch" disabled="@(!CanStart)">
+    <div class="batch-layout">
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">① 选择文件</h2>
+            <BatchFileList @bind-Files="_files"
+                           FileStatuses="_fileStatuses"
+                           IsProcessing="_isProcessing" />
+
+            <div class="output-block">
+                <h2 class="ffui-panel-title">② 输出目录</h2>
+                <FileSelector Label="输出目录"
+                              @bind-Value="_outputDirectory"
+                              Placeholder="转换结果的保存目录"
+                              IsDirectory="true"
+                              ValidateExists="false" />
+                <p class="hint">
+                    批量处理时，输出文件名由模板的扩展名 + 全局命名规则生成。
+                    同名文件按「设置 → 文件已存在时的处理方式」处理，不会卡住等待确认。
+                </p>
+            </div>
+        </section>
+
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">③ 选择模板</h2>
+            <TemplateSelector @bind-SelectedTemplate="_selectedTemplate"
+                              InputPath="@(_files.Count > 0 ? _files[0] : null)" />
+        </section>
+    </div>
+
+    @if (_selectedTemplate != null && _selectedTemplate.Parameters.Count > 0)
+    {
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">
+                ④ 模板参数
+                <span class="ffui-badge">@_selectedTemplate.Name</span>
+                <span class="muted">对本批次所有文件生效</span>
+            </h2>
+            <TemplateParameterEditor Template="_selectedTemplate"
+                                     Values="_parameterValues"
+                                     ValuesChanged="OnParameterValuesChanged"
+                                     Disabled="_isProcessing" />
+        </section>
+    }
+
+    <div class="action-bar">
+        <button type="button" class="ffui-btn ffui-btn-primary ffui-btn-lg"
+                @onclick="StartBatchAsync" disabled="@(!CanStart)">
             @if (_isProcessing)
             {
-                <span class="spinner-small"></span>
-                <span>处理中...</span>
+                <span class="spinner" aria-hidden="true"></span>
+                <span>正在处理…</span>
             }
             else
             {
@@ -52,329 +76,449 @@
             }
         </button>
 
-        @if (_isProcessing)
+        @if (_isProcessing && _batchTask != null)
         {
-            <button class="btn-cancel" @onclick="CancelBatch">
+            <button type="button" class="ffui-btn ffui-btn-danger" @onclick="CancelBatchAsync">
                 ❌ 取消全部
             </button>
         }
 
-        @if (_files.Count > 0 && _selectedTemplate != null)
+        @if (_files.Count > 0 && _selectedTemplate != null && !_isProcessing)
         {
-            <span class="summary-text">
-                将处理 @_files.Count 个文件，输出格式: .@_selectedTemplate.OutputExtension
+            <span class="muted">
+                将处理 @_files.Count 个文件，输出格式 .@_selectedTemplate.OutputExtension
             </span>
+        }
+        else if (!CanStart && !_isProcessing && !string.IsNullOrEmpty(CannotStartReason))
+        {
+            <span class="muted">@CannotStartReason</span>
         }
     </div>
 
-    @if (_batchTask != null || _isProcessing || _completedTasks.Count > 0)
+    @if (_batchTask != null || _batchTasks.Count > 0 || _isProcessing)
     {
-        <div class="progress-section">
-            <BatchProgressPanel TotalCount="_totalCount"
-                                CompletedCount="_completedCount"
-                                FailedCount="_failedCount"
-                                RunningCount="@(_isProcessing ? 1 : 0)"
-                                CurrentTask="_currentTask"
-                                FailedTasks="_failedTasks"
-                                IsProcessing="_isProcessing" />
-        </div>
-    }
+        <section class="ffui-panel">
+            <h2 class="ffui-section-title">
+                <span>📊 处理进度</span>
+                @if (_batchTask != null)
+                {
+                    <span class="ffui-badge">@_batchTask.Name</span>
+                }
+                <button type="button" class="ffui-btn ffui-btn-sm" @onclick="RefreshBatchAsync">刷新</button>
+                @if (!_isProcessing && _completedCount > 0)
+                {
+                    <button type="button" class="ffui-btn ffui-btn-sm" @onclick="OpenFirstOutputFolderAsync">打开输出目录</button>
+                }
+                @if (!_isProcessing && _failedCount > 0)
+                {
+                    <button type="button" class="ffui-btn ffui-btn-sm" @onclick="RetryAllFailedAsync">
+                        重试全部失败项 (@_failedCount)
+                    </button>
+                }
+            </h2>
 
-    @if (!string.IsNullOrEmpty(_message))
-    {
-        <div class="message @_messageClass">@_message</div>
+            <BatchProgressPanel Tasks="_batchTasks"
+                                IsProcessing="_isProcessing"
+                                OnRetry="RetryTaskAsync"
+                                OnCancel="CancelTaskAsync"
+                                OnOpenOutputFolder="OpenOutputFolderAsync" />
+        </section>
     }
 </div>
+
+<style>
+    .page-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
+    .page-head h1 { margin: 0; }
+
+    .batch-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+        gap: 1.25rem;
+        margin-bottom: 1.25rem;
+        align-items: start;
+    }
+
+    section.ffui-panel { margin-bottom: 1.25rem; }
+
+    .output-block { margin-top: 1.1rem; padding-top: 1.1rem; border-top: 1px solid var(--border-color); }
+
+    .hint { margin: 0.4rem 0 0; font-size: 0.8rem; color: var(--text-muted); }
+
+    .muted { color: var(--text-muted); font-size: 0.85rem; font-weight: 400; }
+
+    .action-bar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+
+    @@media (max-width: 1000px) {
+        .batch-layout { grid-template-columns: 1fr; }
+    }
+</style>
 
 @code {
     private List<string> _files = [];
     private Dictionary<string, string> _fileStatuses = [];
     private string _outputDirectory = string.Empty;
     private CommandTemplate? _selectedTemplate;
-    private BatchTask? _batchTask;
-    private ConversionTask? _currentTask;
-    private List<ConversionTask> _completedTasks = [];
-    private List<ConversionTask> _failedTasks = [];
-    private bool _isProcessing;
-    private int _totalCount;
-    private int _completedCount;
-    private int _failedCount;
-    private string _message = string.Empty;
-    private string _messageClass = string.Empty;
-    private CancellationTokenSource? _cts;
+    private Dictionary<string, string> _parameterValues = new(StringComparer.OrdinalIgnoreCase);
+    private AppSettings? _settings;
 
-    private bool CanStart => !_isProcessing &&
-                             _files.Count > 0 &&
-                             !string.IsNullOrEmpty(_outputDirectory) &&
-                             _selectedTemplate != null;
+    private BatchTask? _batchTask;
+    private List<ConversionTask> _batchTasks = [];
+    private bool _isProcessing;
+    private bool _disposed;
+
+    private System.Threading.Timer? _refreshTimer;
+    private int _refreshing;
+
+    private int _completedCount => _batchTasks.Count(t => t.Status == TaskStatus.Completed);
+    private int _failedCount => _batchTasks.Count(t => t.Status is TaskStatus.Failed or TaskStatus.Cancelled);
+
+    private bool CanStart => !_isProcessing
+                             && _files.Count > 0
+                             && !string.IsNullOrWhiteSpace(_outputDirectory)
+                             && _selectedTemplate != null;
+
+    private string CannotStartReason
+    {
+        get
+        {
+            if (_files.Count == 0) return "请先添加要处理的文件";
+            if (_selectedTemplate == null) return "请选择转换模板";
+            if (string.IsNullOrWhiteSpace(_outputDirectory)) return "请选择输出目录";
+            return string.Empty;
+        }
+    }
 
     protected override async Task OnInitializedAsync()
     {
-        var settings = await SettingsService.GetSettingsAsync();
-        _outputDirectory = settings.DefaultOutputDirectory;
+        try
+        {
+            _settings = await SettingsService.GetSettingsAsync();
+            _outputDirectory = _settings.DefaultOutputDirectory;
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"读取设置失败：{ex.Message}");
+        }
 
         TaskService.TaskProgressChanged += OnProgressChanged;
         TaskService.TaskStatusChanged += OnStatusChanged;
     }
 
-    private async Task StartBatch()
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_selectedTemplate == null) return;
+
+        // 模板变化时重置为该模板的默认参数
+        if (_parameterValues.Count == 0 ||
+            !_parameterValues.Keys.All(k => _selectedTemplate.Parameters.Any(p => p.Name == k)))
+        {
+            _parameterValues = TemplateService.CreateDefaultParameterValues(_selectedTemplate);
+        }
+
+        await Task.CompletedTask;
+    }
+
+    private void OnParameterValuesChanged(Dictionary<string, string> values) => _parameterValues = values;
+
+    // ── 执行 ────────────────────────────────────────────────────────
+
+    private async Task StartBatchAsync()
     {
         if (!CanStart || _selectedTemplate == null) return;
 
         _isProcessing = true;
-        _message = string.Empty;
-        _completedTasks.Clear();
-        _failedTasks.Clear();
-        _fileStatuses.Clear();
-        _totalCount = _files.Count;
-        _completedCount = 0;
-        _failedCount = 0;
-        _cts = new CancellationTokenSource();
-
-        StateHasChanged();
 
         try
         {
-            // 确保输出目录存在
             if (!Directory.Exists(_outputDirectory))
             {
                 Directory.CreateDirectory(_outputDirectory);
             }
 
-            // 创建批量任务
-            _batchTask = await TaskService.CreateBatchTaskAsync(
-                _files.ToList(),
-                _outputDirectory,
-                _selectedTemplate.Id);
-
-            // 获取所有子任务并顺序执行
-            var tasks = await TaskService.GetTaskHistoryAsync(
-                limit: _files.Count,
-                status: TaskStatus.Pending);
-
-            tasks = tasks.Where(t => t.BatchId == _batchTask.Id).ToList();
-
-            foreach (var task in tasks)
+            if (!FileService.IsDirectoryWritable(_outputDirectory))
             {
-                if (_cts.Token.IsCancellationRequested) break;
-
-                _currentTask = task;
-                _fileStatuses[task.InputPath] = "Running";
-                StateHasChanged();
-
-                try
-                {
-                    await TaskService.StartTaskAsync(task.Id);
-                }
-                catch (Exception ex)
-                {
-                    // 任务执行失败，继续下一个
-                    _fileStatuses[task.InputPath] = "Failed";
-                    _failedTasks.Add(task);
-                    _failedCount++;
-                }
+                Toast.Error($"输出目录不可写：{_outputDirectory}。请换一个目录或检查文件权限。");
+                return;
             }
 
-            // 批量处理完成
-            _message = _failedCount == 0
-                ? $"✅ 批量处理完成！成功转换 {_completedCount} 个文件"
-                : $"⚠️ 批量处理完成，成功 {_completedCount} 个，失败 {_failedCount} 个";
-            _messageClass = _failedCount == 0 ? "success" : "warning";
+            _fileStatuses = [];
+            _batchTasks = [];
+
+            // 一次性创建并排队，执行完全交给后台队列：
+            // 页面跳转、刷新都不会中断转换（旧实现在页面里顺序 await，切换页面就断了）
+            _batchTask = await TaskService.StartBatchTaskAsync(
+                _files.ToList(), _outputDirectory, _selectedTemplate.Id, _parameterValues);
+
+            foreach (var file in _files)
+            {
+                _fileStatuses[file] = TaskStatus.Pending.ToString();
+            }
+
+            Toast.Success($"已提交 {_files.Count} 个文件到处理队列");
+            StartRefreshTimer();
+            await RefreshBatchAsync();
         }
         catch (Exception ex)
         {
-            _message = $"批量处理失败: {ex.Message}";
-            _messageClass = "error";
-        }
-        finally
-        {
+            Toast.Error($"启动批量处理失败：{ex.Message}");
             _isProcessing = false;
-            _currentTask = null;
-            _cts?.Dispose();
-            _cts = null;
-            StateHasChanged();
         }
     }
 
-    private async Task CancelBatch()
+    private async Task CancelBatchAsync()
     {
-        _cts?.Cancel();
+        if (_batchTask == null) return;
 
-        if (_currentTask != null)
+        try
         {
-            await TaskService.CancelTaskAsync(_currentTask.Id);
+            await TaskService.CancelBatchAsync(_batchTask.Id);
+            Toast.Warning("已取消本批次中所有等待和运行中的任务。");
+            await RefreshBatchAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"取消失败：{ex.Message}");
+        }
+    }
+
+    private async Task CancelTaskAsync(ObjectId taskId)
+    {
+        var graceful = _batchTasks.FirstOrDefault(t => t.Id == taskId)?.Status == TaskStatus.Running;
+        if (await TaskService.CancelTaskAsync(taskId, graceful: graceful))
+        {
+            Toast.Warning(graceful ? "已发送优雅停止指令。" : "已取消该任务。");
+            await RefreshBatchAsync();
+        }
+        else
+        {
+            Toast.Show("该任务已经结束。");
+        }
+    }
+
+    private async Task RetryTaskAsync(ObjectId taskId)
+    {
+        try
+        {
+            var retry = await TaskService.RetryTaskAsync(taskId);
+            if (retry == null)
+            {
+                Toast.Error("找不到原任务，无法重试。");
+                return;
+            }
+
+            Toast.Success("已重新加入队列");
+            _isProcessing = true;
+            StartRefreshTimer();
+            await RefreshBatchAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"重试失败：{ex.Message}");
+        }
+    }
+
+    private async Task RetryAllFailedAsync()
+    {
+        var failed = _batchTasks.Where(t => t.Status is TaskStatus.Failed or TaskStatus.Cancelled).ToList();
+        if (failed.Count == 0)
+        {
+            Toast.Show("没有需要重试的任务。");
+            return;
         }
 
-        _message = "批量处理已取消";
-        _messageClass = "warning";
+        var queued = 0;
+        var errors = new List<string>();
+
+        foreach (var task in failed)
+        {
+            try
+            {
+                if (await TaskService.RetryTaskAsync(task.Id) != null) queued++;
+            }
+            catch (Exception ex)
+            {
+                errors.Add(ex.Message);
+            }
+        }
+
+        if (queued > 0)
+        {
+            _isProcessing = true;
+            StartRefreshTimer();
+            Toast.Success($"已重新排队 {queued} 个任务");
+        }
+        else
+        {
+            Toast.Error($"重试失败：{(errors.Count > 0 ? errors[0] : "没有任务被重新排队")}");
+        }
+
+        await RefreshBatchAsync();
     }
+
+    // ── 刷新 ────────────────────────────────────────────────────────
+
+    private void StartRefreshTimer()
+    {
+        _refreshTimer?.Dispose();
+
+        // 只读取数据库并更新内存对象；所有 UI 更新都通过 InvokeAsync 回到渲染线程
+        _refreshTimer = new System.Threading.Timer(async _ =>
+        {
+            if (_disposed) return;
+            if (Interlocked.Exchange(ref _refreshing, 1) == 1) return;
+
+            try
+            {
+                await RefreshBatchAsync();
+                if (!_disposed) await InvokeAsync(StateHasChanged);
+            }
+            catch
+            {
+                // 定时刷新失败不应影响页面
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _refreshing, 0);
+            }
+        }, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+    }
+
+    private void StopRefreshTimer()
+    {
+        _refreshTimer?.Dispose();
+        _refreshTimer = null;
+    }
+
+    private async Task RefreshBatchAsync()
+    {
+        if (_batchTask == null) return;
+
+        try
+        {
+            var tasks = await TaskService.GetBatchTasksAsync(_batchTask.Id);
+
+            // 重试会产生新任务，这里一并纳入统计
+            var retried = tasks
+                .Where(t => t.RetryOfTaskId != null)
+                .ToList();
+
+            _batchTasks = tasks.Concat(retried).DistinctBy(t => t.Id)
+                .OrderBy(t => t.CreatedAt).ToList();
+
+            foreach (var task in _batchTasks)
+            {
+                _fileStatuses[task.InputPath] = task.Status.ToString();
+            }
+
+            var finished = _batchTasks.Count > 0 &&
+                           _batchTasks.All(t => t.Status is TaskStatus.Completed or TaskStatus.Failed
+                               or TaskStatus.Cancelled or TaskStatus.Skipped);
+
+            if (finished && _isProcessing)
+            {
+                _isProcessing = false;
+                StopRefreshTimer();
+
+                var ok = _batchTasks.Count(t => t.Status == TaskStatus.Completed);
+                var bad = _failedCount;
+
+                if (bad == 0) Toast.Success($"✅ 批量处理完成，成功 {ok} 个文件");
+                else Toast.Warning($"批量处理完成：成功 {ok} 个，失败 {bad} 个");
+
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (Exception ex)
+        {
+            // 静默期的定时刷新里不要刷屏，只在显式刷新时报错
+            _ = ex;
+        }
+    }
+
+    private async Task OpenFirstOutputFolderAsync()
+    {
+        var first = _batchTasks.FirstOrDefault(t => t.Status == TaskStatus.Completed);
+        if (first == null)
+        {
+            Toast.Show("还没有成功完成的文件。");
+            return;
+        }
+        await OpenOutputFolderAsync(first.OutputPath);
+    }
+
+    private async Task OpenOutputFolderAsync(string outputPath)
+    {
+        var directory = Path.GetDirectoryName(outputPath);
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+        {
+            Toast.Warning("输出目录不存在，可能已被移动或删除。");
+            return;
+        }
+
+        try
+        {
+            if (AppPaths.IsWindows)
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{directory}\"") { UseShellExecute = true });
+            }
+            else if (AppPaths.IsMacOS)
+            {
+                System.Diagnostics.Process.Start("open", [directory]);
+            }
+            else
+            {
+                System.Diagnostics.Process.Start("xdg-open", [directory]);
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"无法打开目录：{ex.Message}");
+        }
+
+        await Task.CompletedTask;
+    }
+
+    // ── 事件 ────────────────────────────────────────────────────────
 
     private void OnProgressChanged(object? sender, TaskProgressEventArgs e)
     {
-        if (_currentTask?.Id == e.TaskId)
-        {
-            _currentTask.Progress = e.Progress;
-            _currentTask.ProcessingSpeed = e.Speed;
-            _currentTask.EstimatedTimeRemaining = e.Eta;
-            InvokeAsync(StateHasChanged);
-        }
+        var task = _batchTasks.FirstOrDefault(t => t.Id == e.TaskId);
+        if (task == null) return;
+
+        task.Progress = e.Progress;
+        task.ProcessingSpeed = e.Speed;
+        task.EstimatedTimeRemaining = e.Eta;
+
+        if (!_disposed) _ = InvokeAsync(StateHasChanged);
     }
 
     private void OnStatusChanged(object? sender, TaskStatusEventArgs e)
     {
-        if (_currentTask?.Id == e.TaskId)
+        // 只关心本批次的任务，且不在 UI 线程上做数据库读取
+        if (_batchTask == null) return;
+        if (!_batchTasks.Any(t => t.Id == e.TaskId)) return;
+
+        _ = HandleStatusChangedAsync();
+    }
+
+    private async Task HandleStatusChangedAsync()
+    {
+        try
         {
-            _currentTask.Status = e.NewStatus;
-
-            switch (e.NewStatus)
-            {
-                case TaskStatus.Completed:
-                    _fileStatuses[_currentTask.InputPath] = "Completed";
-                    _completedTasks.Add(_currentTask);
-                    _completedCount++;
-                    break;
-                case TaskStatus.Failed:
-                    _fileStatuses[_currentTask.InputPath] = "Failed";
-                    _currentTask.ErrorMessage = e.ErrorMessage;
-                    _failedTasks.Add(_currentTask);
-                    _failedCount++;
-                    break;
-                case TaskStatus.Cancelled:
-                    _fileStatuses[_currentTask.InputPath] = "Cancelled";
-                    _failedCount++;
-                    break;
-            }
-
-            InvokeAsync(StateHasChanged);
+            await RefreshBatchAsync();
+            if (!_disposed) await InvokeAsync(StateHasChanged);
+        }
+        catch
+        {
+            // 事件回调中的异常不应影响其它订阅者
         }
     }
 
     public void Dispose()
     {
+        _disposed = true;
         TaskService.TaskProgressChanged -= OnProgressChanged;
         TaskService.TaskStatusChanged -= OnStatusChanged;
-        _cts?.Dispose();
+        StopRefreshTimer();
     }
 }
-
-<style>
-    .batch-container {
-        max-width: 1400px;
-        margin: 0 auto;
-    }
-
-    h1 {
-        margin-bottom: 1.5rem;
-    }
-
-    .batch-layout {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 2rem;
-        margin-bottom: 1.5rem;
-    }
-
-    .left-panel {
-        display: flex;
-        flex-direction: column;
-        gap: 1.5rem;
-    }
-
-    .output-section h3 {
-        margin-top: 0;
-        margin-bottom: 1rem;
-        font-size: 1rem;
-    }
-
-    .action-section {
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-        margin-bottom: 1.5rem;
-    }
-
-    .btn-primary {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 1rem 2rem;
-        background: #007bff;
-        color: white;
-        border: none;
-        border-radius: 8px;
-        font-size: 1rem;
-        cursor: pointer;
-        transition: background 0.2s;
-    }
-
-    .btn-primary:hover:not(:disabled) {
-        background: #0056b3;
-    }
-
-    .btn-primary:disabled {
-        background: #ccc;
-        cursor: not-allowed;
-    }
-
-    .btn-cancel {
-        padding: 1rem 1.5rem;
-        background: #dc3545;
-        color: white;
-        border: none;
-        border-radius: 8px;
-        cursor: pointer;
-    }
-
-    .btn-cancel:hover {
-        background: #c82333;
-    }
-
-    .spinner-small {
-        width: 16px;
-        height: 16px;
-        border: 2px solid rgba(255,255,255,0.3);
-        border-top-color: white;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-    }
-
-    @@keyframes spin {
-        to { transform: rotate(360deg); }
-    }
-
-    .summary-text {
-        color: #666;
-        font-size: 0.95rem;
-    }
-
-    .progress-section {
-        margin-bottom: 1.5rem;
-    }
-
-    .message {
-        padding: 1rem;
-        border-radius: 8px;
-        font-size: 0.95rem;
-    }
-
-    .message.success {
-        background: #d4edda;
-        color: #155724;
-    }
-
-    .message.error {
-        background: #f8d7da;
-        color: #721c24;
-    }
-
-    .message.warning {
-        background: #fff3cd;
-        color: #856404;
-    }
-
-    @@media (max-width: 1000px) {
-        .batch-layout {
-            grid-template-columns: 1fr;
-        }
-    }
-</style>

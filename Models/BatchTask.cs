@@ -11,7 +11,7 @@ public class BatchTask
     public string Name { get; set; } = string.Empty;
 
     /// <summary>使用的模板 ID</summary>
-    public ObjectId TemplateId { get; set; }
+    public ObjectId TemplateId { get; set; } = ObjectId.Empty;
 
     /// <summary>总文件数</summary>
     public int TotalFiles { get; set; }

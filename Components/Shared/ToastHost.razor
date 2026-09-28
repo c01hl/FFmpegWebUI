@@ -1,0 +1,50 @@
+@inject IToastService ToastService
+@implements IDisposable
+
+@if (_messages.Count > 0)
+{
+    <div class="ffui-toast-stack" role="status" aria-live="polite">
+        @foreach (var message in _messages)
+        {
+            <div class="ffui-toast @message.CssClass" @key="message.Id">
+                <span aria-hidden="true">@message.Icon</span>
+                <span class="ffui-toast-text">@message.Text</span>
+                <button type="button" class="ffui-icon-btn ffui-toast-close"
+                        aria-label="关闭提示" @onclick="() => Dismiss(message.Id)">✕</button>
+            </div>
+        }
+    </div>
+}
+
+<style>
+    .ffui-toast-text { flex: 1; word-break: break-word; }
+
+    .ffui-toast-close {
+        flex-shrink: 0;
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        padding: 0 0.2rem;
+    }
+</style>
+
+@code {
+    private List<ToastMessage> _messages = [];
+
+    protected override void OnInitialized()
+    {
+        ToastService.Changed += OnChanged;
+        Refresh();
+    }
+
+    private void OnChanged(object? sender, EventArgs e)
+    {
+        Refresh();
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    private void Refresh() => _messages = ToastService.Messages.ToList();
+
+    private void Dismiss(Guid id) => ToastService.Dismiss(id);
+
+    public void Dispose() => ToastService.Changed -= OnChanged;
+}

@@ -1,758 +1,1104 @@
+@page "/templates-admin"
 @page "/templates/admin"
-@using FFmpegWebUI.Models
-@using FFmpegWebUI.Services
-@using FFmpegWebUI.Components.Shared
 @inject ITemplateService TemplateService
+@inject ITaskService TaskService
+@inject IFileService FileService
+@inject IAppStatusService AppStatusService
+@inject IToastService Toast
+@inject IJSRuntime JS
+@implements IDisposable
 @rendermode InteractiveServer
 
-<PageTitle>预设模板管理 - FFmpeg Web UI</PageTitle>
+<PageTitle>预设模板管理 - @AppInfo.Name</PageTitle>
 
-<div class="admin-container">
-    <div class="admin-header">
-        <h1>🔧 预设模板管理</h1>
-        <span class="admin-badge">管理员入口</span>
+<div class="ffui-container">
+    <div class="page-head">
+        <div>
+            <h1>🔧 预设模板管理</h1>
+            <p class="page-sub">系统预设模板的完整增删改查、预设重置与运行诊断。</p>
+        </div>
+        <span class="ffui-badge ffui-badge-warning">⚠️ 高级页面</span>
     </div>
 
-    <div class="warning-banner">
-        ⚠️ 警告：此页面用于编辑系统预设模板。修改后需要清除数据库中的系统模板才能重新初始化。
+    <div class="ffui-alert ffui-alert-warning admin-warning" role="alert">
+        <span aria-hidden="true">⚠️</span>
+        <div>
+            <p>
+                这个页面可以直接修改<strong>系统预设模板</strong>，改动会影响「转换」与「批量处理」里的选项。
+            </p>
+            <p>
+                应用默认只监听 127.0.0.1（仅本机可访问），因此没有额外的登录校验；
+                如果把服务暴露到局域网，任何人都可以修改这里的模板。
+            </p>
+        </div>
     </div>
 
-    <div class="action-bar">
-        <button class="btn-primary" @onclick="CreateSystemTemplate">
-            ➕ 创建预设模板
+    <div class="head-actions">
+        <button type="button" class="ffui-btn ffui-btn-primary" @onclick="OpenCreateEditor" disabled="@IsBusy">
+            ➕ 新建
         </button>
-        <button class="btn-danger" @onclick="ShowResetConfirm">
-            🔄 重置所有预设模板
+        <button type="button" class="ffui-btn" @onclick="ExportAsync" disabled="@(IsBusy || _allTemplates.Count == 0)">
+            ⬇️ 导出全部
+        </button>
+        <button type="button" class="ffui-btn" @onclick="OpenImport" disabled="@IsBusy">
+            📥 导入
+        </button>
+        <button type="button" class="ffui-btn" @onclick="RefreshAllAsync" disabled="@IsBusy">
+            🔄 刷新
         </button>
     </div>
 
-    <div class="templates-section">
-        <h2>系统预设模板 (@_systemTemplates.Count)</h2>
-        
+    <div class="ffui-panel toolbar">
+        <div class="toolbar-row">
+            <label class="field search-field">
+                <span class="field-label">搜索</span>
+                <input type="search" placeholder="搜索名称、描述、分类、编码器…"
+                       aria-label="搜索模板" @bind="_searchInput" @bind:event="oninput" @bind:after="RebuildView" />
+            </label>
+
+            <label class="field">
+                <span class="field-label">类型</span>
+                <select aria-label="按类型筛选" @bind="_typeFilter" @bind:after="RebuildView">
+                    <option value="all">全部</option>
+                    <option value="system">系统</option>
+                    <option value="user">用户</option>
+                </select>
+            </label>
+
+            <button type="button" class="ffui-btn" @onclick="ClearFilters" disabled='@(_searchInput.Length == 0 && _typeFilter == "all")'>
+                清除筛选
+            </button>
+        </div>
+
+        <p class="result-count" aria-live="polite">
+            显示 @_visible.Count 个模板（共 @_allTemplates.Count 个：系统 @_systemCount · 用户 @_userCount）
+        </p>
+    </div>
+
+    <div class="ffui-panel table-panel">
+        <h2 class="ffui-panel-title">模板列表</h2>
+
         @if (_isLoading)
         {
-            <div class="loading">加载中...</div>
+            <div class="ffui-loading-row" aria-busy="true">
+                <span class="spinner" aria-hidden="true"></span>
+                <span>正在加载模板…</span>
+            </div>
+        }
+        else if (_allTemplates.Count == 0)
+        {
+            <div class="ffui-empty-state">
+                <p>数据库里还没有任何模板。可以点「新建」创建一个，或点「导入」导入 JSON。</p>
+            </div>
+        }
+        else if (_visible.Count == 0)
+        {
+            <div class="ffui-empty-state">
+                <p>没有符合当前筛选条件的模板。</p>
+                <button type="button" class="ffui-btn" @onclick="ClearFilters">清除筛选</button>
+            </div>
         }
         else
         {
-            <table class="admin-table">
-                <thead>
-                    <tr>
-                        <th>名称</th>
-                        <th>分类</th>
-                        <th>输出格式</th>
-                        <th>硬件加速</th>
-                        <th>排序</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @foreach (var template in _systemTemplates.OrderBy(t => t.SortOrder))
-                    {
+            <div class="table-wrap">
+                <table class="admin-table">
+                    <thead>
                         <tr>
-                            <td>@template.Name</td>
-                            <td>@template.Category</td>
-                            <td>.@template.OutputExtension</td>
-                            <td>
-                                @if (template.RequiresHardwareAcceleration)
-                                {
-                                    <span class="badge hw">@template.RequiredEncoder</span>
-                                }
-                                else
-                                {
-                                    <span class="muted">否</span>
-                                }
-                            </td>
-                            <td>@template.SortOrder</td>
-                            <td>
-                                <button class="btn-sm" @onclick="() => EditSystemTemplate(template)">✏️ 编辑</button>
-                                <button class="btn-sm danger" @onclick="() => DeleteSystemTemplate(template)">🗑️ 删除</button>
-                            </td>
+                            <th scope="col" aria-sort='@AriaSort("name")'>
+                                <button type="button" class="th-sort" @onclick='() => ToggleSort("name")'>
+                                    名称 @SortIndicator("name")
+                                </button>
+                            </th>
+                            <th scope="col" aria-sort='@AriaSort("category")'>
+                                <button type="button" class="th-sort" @onclick='() => ToggleSort("category")'>
+                                    分类 @SortIndicator("category")
+                                </button>
+                            </th>
+                            <th scope="col" aria-sort='@AriaSort("type")'>
+                                <button type="button" class="th-sort" @onclick='() => ToggleSort("type")'>
+                                    类型 @SortIndicator("type")
+                                </button>
+                            </th>
+                            <th scope="col" aria-sort='@AriaSort("extension")'>
+                                <button type="button" class="th-sort" @onclick='() => ToggleSort("extension")'>
+                                    输出格式 @SortIndicator("extension")
+                                </button>
+                            </th>
+                            <th scope="col" aria-sort='@AriaSort("encoder")'>
+                                <button type="button" class="th-sort" @onclick='() => ToggleSort("encoder")'>
+                                    编码器 @SortIndicator("encoder")
+                                </button>
+                            </th>
+                            <th scope="col" aria-sort='@AriaSort("sort")'>
+                                <button type="button" class="th-sort" @onclick='() => ToggleSort("sort")'>
+                                    排序 @SortIndicator("sort")
+                                </button>
+                            </th>
+                            <th scope="col" aria-sort='@AriaSort("updated")'>
+                                <button type="button" class="th-sort" @onclick='() => ToggleSort("updated")'>
+                                    更新时间 @SortIndicator("updated")
+                                </button>
+                            </th>
+                            <th scope="col">操作</th>
                         </tr>
-                    }
-                </tbody>
-            </table>
+                    </thead>
+                    <tbody>
+                        @foreach (var template in _visible)
+                        {
+                            <tr @key="template.Id">
+                                <td>
+                                    <span class="name-cell">@template.Name</span>
+                                    @if (template.IsRecommended)
+                                    {
+                                        <span class="ffui-badge ffui-badge-primary">推荐</span>
+                                    }
+                                </td>
+                                <td>@(string.IsNullOrWhiteSpace(template.Category) ? "未分类" : template.Category)</td>
+                                <td>
+                                    <span class="ffui-badge @(template.Type == TemplateType.System ? "ffui-badge-info" : "ffui-badge-success")">
+                                        @(template.Type == TemplateType.System ? "系统" : "用户")
+                                    </span>
+                                </td>
+                                <td class="mono">@(string.IsNullOrWhiteSpace(template.OutputExtension) ? "-" : "." + template.OutputExtension)</td>
+                                <td>@EncoderDisplay(template)</td>
+                                <td class="num">@template.SortOrder</td>
+                                <td class="num">@template.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                                <td>
+                                    <div class="cell-actions">
+                                        <button type="button" class="ffui-btn ffui-btn-sm"
+                                                disabled="@IsBusy" @onclick="() => OpenEditEditor(template)">
+                                            ✏️ 编辑
+                                        </button>
+                                        <button type="button" class="ffui-btn ffui-btn-sm ffui-btn-danger"
+                                                disabled="@IsBusy" @onclick="() => RequestDelete(template)">
+                                            🗑️ 删除
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
         }
     </div>
 
-    @if (!string.IsNullOrEmpty(_message))
-    {
-        <div class="message @_messageClass">@_message</div>
-    }
+    <div class="ffui-panel diag-panel">
+        <h2 class="ffui-panel-title">运行诊断</h2>
+        <div class="diag-grid">
+            <div class="diag-item">
+                <span class="diag-key">数据目录</span>
+                <span class="diag-value mono">@AppPaths.DataDirectory</span>
+                <span class="ffui-badge @(_dataDirWritable ? "ffui-badge-success" : "ffui-badge-danger")">
+                    @(_dataDirWritable ? "可写" : "不可写")
+                </span>
+            </div>
+
+            <div class="diag-item">
+                <span class="diag-key">模板数量</span>
+                <span class="diag-value">@_allTemplates.Count 个（系统 @_systemCount · 用户 @_userCount）</span>
+            </div>
+
+            <div class="diag-item">
+                <span class="diag-key">任务队列</span>
+                <span class="diag-value">
+                    运行中 @TaskService.ActiveCount · 等待中 @TaskService.QueuedCount · 历史记录 @(_status?.TaskCount ?? 0)
+                </span>
+            </div>
+
+            <div class="diag-item">
+                <span class="diag-key">历史清理</span>
+                <span class="diag-value">
+                    <label class="inline-field">
+                        保留最近
+                        <input type="number" min="1" max="3650" aria-label="历史保留天数" @bind="_cleanupDays" />
+                        天
+                    </label>
+                    <button type="button" class="ffui-btn ffui-btn-sm" @onclick="CleanupHistoryAsync" disabled="@_isCleaning">
+                        @if (_isCleaning)
+                        {
+                            <span class="spinner" aria-hidden="true"></span>
+                        }
+                        🧹 清理历史
+                    </button>
+                </span>
+            </div>
+
+            <div class="diag-item">
+                <span class="diag-key">FFmpeg</span>
+                <span class="diag-value">
+                    @if (_status is null)
+                    {
+                        <span>查询中…</span>
+                    }
+                    else if (_status.FFmpegAvailable)
+                    {
+                        <span>@_status.FFmpegVersion</span>
+                    }
+                    else
+                    {
+                        <span class="ffui-badge ffui-badge-danger">不可用</span>
+                    }
+                </span>
+                <span class="diag-value mono">@(_status?.FFmpegPath ?? string.Empty)</span>
+            </div>
+
+            <div class="diag-item">
+                <span class="diag-key">预设版本</span>
+                <span class="diag-value">v@(TemplateService.PresetVersion)</span>
+            </div>
+        </div>
+    </div>
+
+    <details class="danger-zone">
+        <summary>⚠️ 危险区域</summary>
+        <div class="danger-body">
+            <div class="danger-item">
+                <div class="danger-text">
+                    <h3>重置系统预设模板</h3>
+                    <p>
+                        删除当前数据库里的<strong>全部系统预设模板</strong>，然后按内置预设
+                        （v@(TemplateService.PresetVersion)）重新写入。
+                        <strong>用户自己创建的模板会保留</strong>，但对系统预设做过的所有手工修改都会丢失。
+                    </p>
+                </div>
+                <button type="button" class="ffui-btn ffui-btn-danger" @onclick="RequestReset" disabled="@IsBusy">
+                    🔄 重置系统模板
+                </button>
+            </div>
+        </div>
+    </details>
 </div>
 
-@* 系统模板编辑器 *@
-<div class="system-editor @(_showEditor ? "visible" : "")">
-    <div class="editor-overlay" @onclick="CloseEditor"></div>
-    <div class="editor-panel">
-        <div class="editor-header">
-            <h2>@(_isCreating ? "创建预设模板" : "编辑预设模板")</h2>
-            <button class="close-btn" @onclick="CloseEditor">✕</button>
+<TemplateEditor Template="_editorTemplate"
+                IsOpen="_editorOpen"
+                IsOpenChanged="OnEditorOpenChanged"
+                IsSystem="_editorIsSystem"
+                OnSaved="OnTemplateSaved" />
+
+<Modal IsOpen="_importOpen" IsOpenChanged="OnImportOpenChanged" Title="导入模板" Size="lg"
+       DisableClose="@_isImporting" CloseOnBackdrop="@(!_isImporting)">
+    <p class="modal-hint">
+        把「导出」得到的 JSON 内容粘贴到下面。浏览器出于安全限制不允许页面直接读取剪贴板，
+        请手动粘贴（⌘/Ctrl + V）。
+    </p>
+    <textarea class="import-json" rows="10" aria-label="模板 JSON 内容"
+              placeholder="在此粘贴包含 templates 数组的 JSON"
+              @bind="_importJson" @bind:event="oninput"></textarea>
+
+    <label class="switch import-switch">
+        <input type="checkbox" @bind="_importAsSystem" />
+        导入为系统模板
+    </label>
+    @if (_importAsSystem)
+    {
+        <div class="ffui-alert ffui-alert-warning" role="alert">
+            <span aria-hidden="true">⚠️</span>
+            <span>
+                导入为系统模板后，这些模板会被标记成系统预设，并可能在后续的系统预设同步或重置时
+                被内置预设覆盖、删除。只在明确知道用途时启用。
+            </span>
         </div>
+    }
 
-        <div class="editor-body">
-            <div class="form-group @(HasFieldError("Name") ? "has-error" : "")">
-                <label>模板名称 *</label>
-                <input type="text" @bind="_editingTemplate.Name" @ref="_adminNameInput" />
-                @if (HasFieldError("Name"))
-                {
-                    <span class="field-error">@GetFieldError("Name")</span>
-                }
-            </div>
-
-            <div class="form-group">
-                <label>描述</label>
-                <textarea @bind="_editingTemplate.Description" rows="2"></textarea>
-            </div>
-
-            <div class="form-group @(HasFieldError("Category") ? "has-error" : "")">
-                <label>分类 *</label>
-                <input type="text" @bind="_editingTemplate.Category" @ref="_adminCategoryInput" list="categories" />
-                <datalist id="categories">
-                    @foreach (var cat in _categories)
-                    {
-                        <option value="@cat" />
-                    }
-                </datalist>
-                @if (HasFieldError("Category"))
-                {
-                    <span class="field-error">@GetFieldError("Category")</span>
-                }
-            </div>
-
-            <div class="form-group @(HasFieldError("CommandArgs") ? "has-error" : "")">
-                <label>FFmpeg 命令参数 *</label>
-                <textarea @bind="_editingTemplate.CommandArgs" @ref="_adminCommandArgsInput" rows="4"></textarea>
-                <span class="help-text">占位符：{"{input}"} 输入文件, {"{output}"} 输出文件</span>
-                @if (HasFieldError("CommandArgs"))
-                {
-                    <span class="field-error">@GetFieldError("CommandArgs")</span>
-                }
-            </div>
-
-            <div class="form-row">
-                <div class="form-group half @(HasFieldError("OutputExtension") ? "has-error" : "")">
-                    <label>输出扩展名 *</label>
-                    <input type="text" @bind="_editingTemplate.OutputExtension" @ref="_adminOutputExtInput" />
-                    @if (HasFieldError("OutputExtension"))
-                    {
-                        <span class="field-error">@GetFieldError("OutputExtension")</span>
-                    }
-                </div>
-                <div class="form-group half">
-                    <label>排序权重</label>
-                    <input type="number" @bind="_editingTemplate.SortOrder" />
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label>支持的输入格式（逗号分隔）</label>
-                <input type="text" @bind="_inputFormatsText" placeholder="mp4, avi, mkv" />
-            </div>
-
-            <div class="form-group checkbox">
-                <label>
-                    <input type="checkbox" @bind="_editingTemplate.RequiresHardwareAcceleration" />
-                    需要硬件加速
-                </label>
-            </div>
-
-            @if (_editingTemplate.RequiresHardwareAcceleration)
+    <div class="ffui-modal-footer">
+        <button type="button" class="ffui-btn" disabled="@_isImporting" @onclick="CloseImport">取消</button>
+        <button type="button" class="ffui-btn ffui-btn-primary" disabled="@_isImporting" @onclick="ImportAsync">
+            @if (_isImporting)
             {
-                <div class="form-group">
-                    <label>所需编码器</label>
-                    <select @bind="_editingTemplate.RequiredEncoder">
-                        <option value="">选择编码器</option>
-                        <option value="h264_nvenc">NVIDIA NVENC H.264</option>
-                        <option value="hevc_nvenc">NVIDIA NVENC H.265</option>
-                        <option value="h264_qsv">Intel QSV H.264</option>
-                        <option value="hevc_qsv">Intel QSV H.265</option>
-                        <option value="h264_amf">AMD AMF H.264</option>
-                        <option value="hevc_amf">AMD AMF H.265</option>
-                    </select>
-                </div>
+                <span class="spinner" aria-hidden="true"></span>
             }
-
-            @if (!string.IsNullOrEmpty(_saveError))
-            {
-                <div class="error-message">@_saveError</div>
-            }
-        </div>
-
-        <div class="editor-footer">
-            <button class="btn-secondary" @onclick="CloseEditor">取消</button>
-            <button class="btn-primary" @onclick="SaveSystemTemplate">保存</button>
-        </div>
+            导入
+        </button>
     </div>
-</div>
+</Modal>
 
-@* 重置确认对话框 *@
-@if (_showResetConfirm)
-{
-    <div class="confirm-dialog">
-        <div class="confirm-overlay" @onclick="() => _showResetConfirm = false"></div>
-        <div class="confirm-panel">
-            <h3>⚠️ 确认重置</h3>
-            <p>这将删除所有系统预设模板，然后重新从代码初始化。此操作不可撤销！</p>
-            <div class="confirm-actions">
-                <button class="btn-secondary" @onclick="() => _showResetConfirm = false">取消</button>
-                <button class="btn-danger" @onclick="ResetSystemTemplates">确认重置</button>
-            </div>
-        </div>
-    </div>
-}
+<ConfirmDialog IsOpen="_deleteOpen"
+               IsOpenChanged="OnDeleteOpenChanged"
+               Danger="true"
+               Title="@_deleteTitle"
+               Message="@_deleteMessage"
+               Detail="@_deleteDetail"
+               ConfirmText="删除"
+               IsBusy="_deleteBusy"
+               OnConfirm="ConfirmDeleteAsync" />
 
-@code {
-    private List<CommandTemplate> _systemTemplates = [];
-    private List<string> _categories = [];
-    private bool _isLoading = true;
-    private string _message = string.Empty;
-    private string _messageClass = string.Empty;
-    
-    private bool _showEditor;
-    private bool _isCreating;
-    private CommandTemplate _editingTemplate = new();
-    private string _inputFormatsText = string.Empty;
-    private string _saveError = string.Empty;
-    private Dictionary<string, string> _fieldErrors = [];
-    
-    // 输入框引用
-    private ElementReference _adminNameInput;
-    private ElementReference _adminCategoryInput;
-    private ElementReference _adminCommandArgsInput;
-    private ElementReference _adminOutputExtInput;
-    
-    private bool _showResetConfirm;
-    
-    private bool HasFieldError(string field) => _fieldErrors.ContainsKey(field);
-    private string GetFieldError(string field) => _fieldErrors.TryGetValue(field, out var error) ? error : string.Empty;
-
-    protected override async Task OnInitializedAsync()
-    {
-        await LoadTemplates();
-    }
-
-    private async Task LoadTemplates()
-    {
-        _isLoading = true;
-        var all = await TemplateService.GetAllTemplatesAsync();
-        _systemTemplates = all.Where(t => t.Type == TemplateType.System).ToList();
-        _categories = all.Select(t => t.Category).Distinct().Where(c => !string.IsNullOrEmpty(c)).OrderBy(c => c).ToList();
-        _isLoading = false;
-    }
-
-    private void CreateSystemTemplate()
-    {
-        _editingTemplate = new CommandTemplate
-        {
-            Type = TemplateType.System,
-            SortOrder = _systemTemplates.Count
-        };
-        _inputFormatsText = string.Empty;
-        _isCreating = true;
-        _saveError = string.Empty;
-        _fieldErrors.Clear();
-        _showEditor = true;
-    }
-
-    private void EditSystemTemplate(CommandTemplate template)
-    {
-        _editingTemplate = new CommandTemplate
-        {
-            Id = template.Id,
-            Name = template.Name,
-            Description = template.Description,
-            Category = template.Category,
-            CommandArgs = template.CommandArgs,
-            OutputExtension = template.OutputExtension,
-            SupportedInputFormats = [.. template.SupportedInputFormats],
-            RequiresHardwareAcceleration = template.RequiresHardwareAcceleration,
-            RequiredEncoder = template.RequiredEncoder,
-            SortOrder = template.SortOrder,
-            Type = TemplateType.System,
-            CreatedAt = template.CreatedAt
-        };
-        _inputFormatsText = string.Join(", ", template.SupportedInputFormats);
-        _isCreating = false;
-        _saveError = string.Empty;
-        _fieldErrors.Clear();
-        _showEditor = true;
-    }
-
-    private async Task SaveSystemTemplate()
-    {
-        _saveError = string.Empty;
-        _fieldErrors.Clear();
-
-        // 验证并收集所有错误
-        if (string.IsNullOrWhiteSpace(_editingTemplate.Name))
-        {
-            _fieldErrors["Name"] = "请输入模板名称";
-        }
-        if (string.IsNullOrWhiteSpace(_editingTemplate.Category))
-        {
-            _fieldErrors["Category"] = "请输入模板分类";
-        }
-        if (string.IsNullOrWhiteSpace(_editingTemplate.CommandArgs))
-        {
-            _fieldErrors["CommandArgs"] = "请输入 FFmpeg 命令参数";
-        }
-        if (string.IsNullOrWhiteSpace(_editingTemplate.OutputExtension))
-        {
-            _fieldErrors["OutputExtension"] = "请输入输出扩展名";
-        }
-
-        // 如果有错误，聚焦到第一个错误字段
-        if (_fieldErrors.Count > 0)
-        {
-            StateHasChanged();
-            await FocusFirstFieldError();
-            return;
-        }
-
-        _editingTemplate.SupportedInputFormats = _inputFormatsText
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(f => f.TrimStart('.').ToLower())
-            .ToList();
-
-        _editingTemplate.UpdatedAt = DateTime.UtcNow;
-
-        try
-        {
-            if (_isCreating)
-            {
-                _editingTemplate.CreatedAt = DateTime.UtcNow;
-                await TemplateService.CreateSystemTemplateAsync(_editingTemplate);
-                _message = $"✓ 预设模板 \"{_editingTemplate.Name}\" 已创建";
-            }
-            else
-            {
-                await TemplateService.UpdateSystemTemplateAsync(_editingTemplate);
-                _message = $"✓ 预设模板 \"{_editingTemplate.Name}\" 已更新";
-            }
-            _messageClass = "success";
-            _showEditor = false;
-            await LoadTemplates();
-        }
-        catch (Exception ex)
-        {
-            _saveError = $"保存失败: {ex.Message}";
-        }
-    }
-
-    private async Task FocusFirstFieldError()
-    {
-        await Task.Delay(50); // 等待 DOM 更新
-        
-        if (_fieldErrors.ContainsKey("Name"))
-            await _adminNameInput.FocusAsync();
-        else if (_fieldErrors.ContainsKey("Category"))
-            await _adminCategoryInput.FocusAsync();
-        else if (_fieldErrors.ContainsKey("CommandArgs"))
-            await _adminCommandArgsInput.FocusAsync();
-        else if (_fieldErrors.ContainsKey("OutputExtension"))
-            await _adminOutputExtInput.FocusAsync();
-    }
-
-    private async Task DeleteSystemTemplate(CommandTemplate template)
-    {
-        var success = await TemplateService.DeleteSystemTemplateAsync(template.Id);
-        if (success)
-        {
-            _message = $"✓ 预设模板 \"{template.Name}\" 已删除";
-            _messageClass = "success";
-            await LoadTemplates();
-        }
-        else
-        {
-            _message = "删除失败";
-            _messageClass = "error";
-        }
-    }
-
-    private void ShowResetConfirm()
-    {
-        _showResetConfirm = true;
-    }
-
-    private async Task ResetSystemTemplates()
-    {
-        _showResetConfirm = false;
-        await TemplateService.ResetSystemTemplatesAsync();
-        _message = "✓ 预设模板已重置";
-        _messageClass = "success";
-        await LoadTemplates();
-    }
-
-    private void CloseEditor()
-    {
-        _showEditor = false;
-        _fieldErrors.Clear();
-    }
-}
+<ConfirmDialog IsOpen="_resetOpen"
+               IsOpenChanged="OnResetOpenChanged"
+               Danger="true"
+               Title="重置系统预设模板"
+               Message="确定要删除所有系统预设模板并重新写入内置预设吗？"
+               Detail="用户自己创建的模板会被保留；对系统预设模板做过的所有手工修改都会丢失，且无法撤销。"
+               ConfirmText="确认重置"
+               IsBusy="_resetBusy"
+               OnConfirm="ConfirmResetAsync" />
 
 <style>
-    .admin-container {
-        max-width: 1200px;
-        margin: 0 auto;
-    }
-
-    .admin-header {
+    .page-head {
         display: flex;
-        align-items: center;
-        gap: 1rem;
-        margin-bottom: 1rem;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+        margin-bottom: var(--spacing-4);
     }
 
-    .admin-header h1 {
+    .page-head h1 {
         margin: 0;
     }
 
-    .admin-badge {
-        background: #dc3545;
-        color: white;
-        padding: 0.25rem 0.75rem;
-        border-radius: 4px;
-        font-size: 0.8rem;
+    .page-sub {
+        margin: 0.25rem 0 0;
+        color: var(--text-muted);
+        font-size: 0.88rem;
     }
 
-    .warning-banner {
-        background: #fff3cd;
-        color: #856404;
-        padding: 1rem;
-        border-radius: 8px;
-        margin-bottom: 1.5rem;
-        border: 1px solid #ffeeba;
+    .admin-warning {
+        margin-bottom: var(--spacing-4);
     }
 
-    .action-bar {
+    .admin-warning p {
+        margin: 0 0 0.35rem;
+    }
+
+    .admin-warning p:last-child {
+        margin-bottom: 0;
+    }
+
+    .head-actions {
         display: flex;
-        gap: 1rem;
-        margin-bottom: 1.5rem;
+        flex-wrap: wrap;
+        gap: var(--spacing-2);
+        margin-bottom: var(--spacing-4);
     }
 
-    .templates-section {
-        background: var(--card-bg, white);
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 8px;
-        padding: 1.5rem;
+    .toolbar {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        margin-bottom: var(--spacing-4);
     }
 
-    .templates-section h2 {
-        margin: 0 0 1rem 0;
-        font-size: 1.1rem;
-        color: var(--text-primary, #333);
+    .toolbar-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: var(--spacing-3);
+    }
+
+    .field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+        min-width: 170px;
+    }
+
+    .field-label {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+    }
+
+    .search-field {
+        flex: 1 1 260px;
+    }
+
+    .result-count {
+        margin: 0;
+        color: var(--text-secondary);
+        font-size: 0.88rem;
+    }
+
+    .table-panel,
+    .diag-panel {
+        margin-bottom: var(--spacing-4);
+    }
+
+    .table-wrap {
+        overflow-x: auto;
     }
 
     .admin-table {
         width: 100%;
         border-collapse: collapse;
+        font-size: 0.9rem;
     }
 
     .admin-table th,
     .admin-table td {
-        padding: 0.75rem;
+        padding: 0.55rem 0.6rem;
+        border-bottom: 1px solid var(--border-color);
         text-align: left;
-        border-bottom: 1px solid var(--border-color, #ddd);
+        vertical-align: top;
     }
 
     .admin-table th {
-        background: var(--light-bg, #f8f9fa);
-        font-weight: 500;
-        color: var(--text-secondary, #666);
+        background: var(--surface-3);
+        color: var(--text-secondary);
+        font-weight: 600;
+        white-space: nowrap;
     }
 
-    .admin-table td {
-        color: var(--text-primary, #333);
+    .admin-table tbody tr:hover {
+        background: var(--surface-3);
     }
 
-    .badge.hw {
-        background: #cce5ff;
-        color: #004085;
-        padding: 0.2rem 0.5rem;
-        border-radius: 4px;
-        font-size: 0.8rem;
-    }
-
-    .muted {
-        color: var(--text-muted, #888);
-    }
-
-    .btn-sm {
-        padding: 0.3rem 0.6rem;
-        border-radius: 4px;
-        font-size: 0.8rem;
-        cursor: pointer;
-        background: var(--light-bg, #f8f9fa);
-        border: 1px solid var(--border-color, #ddd);
-        color: var(--text-primary, #333);
-        margin-right: 0.25rem;
-    }
-
-    .btn-sm:hover {
-        background: var(--card-bg, #e9ecef);
-    }
-
-    .btn-sm.danger {
-        background: #f8d7da;
-        border-color: #f5c6cb;
-        color: #721c24;
-    }
-
-    .btn-sm.danger:hover {
-        background: #f5c6cb;
-    }
-
-    .btn-primary {
-        padding: 0.6rem 1.25rem;
-        background: #007bff;
-        color: white;
-        border: none;
-        border-radius: 6px;
-        cursor: pointer;
-    }
-
-    .btn-primary:hover {
-        background: #0056b3;
-    }
-
-    .btn-secondary {
-        padding: 0.6rem 1.25rem;
-        background: var(--light-bg, #f8f9fa);
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 6px;
-        cursor: pointer;
-        color: var(--text-primary, #333);
-    }
-
-    .btn-danger {
-        padding: 0.6rem 1.25rem;
-        background: #dc3545;
-        color: white;
-        border: none;
-        border-radius: 6px;
-        cursor: pointer;
-    }
-
-    .btn-danger:hover {
-        background: #c82333;
-    }
-
-    .loading {
-        text-align: center;
-        padding: 2rem;
-        color: var(--text-secondary, #666);
-    }
-
-    .message {
-        position: fixed;
-        bottom: 2rem;
-        right: 2rem;
-        padding: 1rem 1.5rem;
-        border-radius: 8px;
-        z-index: 100;
-    }
-
-    .message.success {
-        background: #d4edda;
-        color: #155724;
-    }
-
-    .message.error {
-        background: #f8d7da;
-        color: #721c24;
-    }
-
-    /* 编辑器样式 */
-    .system-editor {
-        display: none;
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 1000;
-    }
-
-    .system-editor.visible {
-        display: block;
-    }
-
-    .editor-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.5);
-    }
-
-    .editor-panel {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        width: 90%;
-        max-width: 600px;
-        max-height: 90vh;
-        background: var(--card-bg, white);
-        border-radius: 8px;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        color: var(--text-primary, #333);
-    }
-
-    .editor-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 1rem 1.5rem;
-        border-bottom: 1px solid var(--border-color, #ddd);
-        background: var(--light-bg, #f8f9fa);
-    }
-
-    .editor-header h2 {
-        margin: 0;
-        font-size: 1.25rem;
-    }
-
-    .close-btn {
+    .th-sort {
         background: none;
         border: none;
-        font-size: 1.5rem;
+        padding: 0;
+        font: inherit;
+        font-weight: 600;
+        color: inherit;
         cursor: pointer;
-        color: var(--text-secondary, #666);
+        white-space: nowrap;
     }
 
-    .editor-body {
-        flex: 1;
-        padding: 1.5rem;
-        overflow-y: auto;
+    .name-cell {
+        margin-right: 0.35rem;
     }
 
-    .form-group {
-        margin-bottom: 1rem;
-    }
-
-    .form-group label {
-        display: block;
-        font-weight: 500;
-        margin-bottom: 0.5rem;
-    }
-
-    .form-group input,
-    .form-group textarea,
-    .form-group select {
-        width: 100%;
-        padding: 0.6rem;
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 4px;
-        font-size: 0.95rem;
-        background: var(--input-bg, white);
-        color: var(--text-primary, #333);
-    }
-
-    .form-group.checkbox label {
+    .cell-actions {
         display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-1);
+    }
+
+    .num {
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+
+    .mono {
+        font-family: var(--font-mono);
+        font-size: 0.84rem;
+        word-break: break-all;
+    }
+
+    .diag-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: var(--spacing-3);
+    }
+
+    .diag-item {
+        display: flex;
+        flex-wrap: wrap;
         align-items: center;
-        gap: 0.5rem;
+        gap: var(--spacing-2);
+    }
+
+    .diag-key {
+        min-width: 76px;
+        font-size: 0.82rem;
+        color: var(--text-muted);
+    }
+
+    .diag-value {
+        font-size: 0.9rem;
+        color: var(--text-primary);
+        word-break: break-all;
+    }
+
+    .inline-field {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.9rem;
+        color: var(--text-secondary);
+    }
+
+    .inline-field input {
+        width: 5.5rem;
+    }
+
+    .danger-zone {
+        border: 1px solid var(--danger-color);
+        border-radius: var(--radius-md);
+        background: var(--danger-bg);
+        padding: var(--spacing-3) var(--spacing-4);
+        margin-bottom: var(--spacing-5);
+    }
+
+    .danger-zone summary {
+        cursor: pointer;
+        color: var(--danger-text);
+        font-weight: 600;
+    }
+
+    .danger-body {
+        margin-top: var(--spacing-3);
+    }
+
+    .danger-item {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+    }
+
+    .danger-text h3 {
+        margin: 0 0 0.25rem;
+        color: var(--danger-text);
+    }
+
+    .danger-text p {
+        margin: 0;
+        color: var(--danger-text);
+        font-size: 0.88rem;
+        max-width: 62ch;
+    }
+
+    .modal-hint {
+        margin: 0 0 var(--spacing-3);
+        color: var(--text-secondary);
+        font-size: 0.88rem;
+    }
+
+    .import-json {
+        font-family: var(--font-mono);
+        font-size: 0.85rem;
+    }
+
+    .switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.9rem;
+        color: var(--text-primary);
         cursor: pointer;
     }
 
-    .form-group.checkbox input {
-        width: auto;
-    }
-
-    .form-row {
-        display: flex;
-        gap: 1rem;
-    }
-
-    .form-group.half {
-        flex: 1;
-    }
-
-    .help-text {
-        display: block;
-        font-size: 0.8rem;
-        color: var(--text-muted, #888);
-        margin-top: 0.25rem;
-    }
-
-    .form-group.has-error input,
-    .form-group.has-error textarea,
-    .form-group.has-error select {
-        border-color: #dc3545;
-        background-color: #fff8f8;
-    }
-
-    .field-error {
-        display: block;
-        font-size: 0.85rem;
-        color: #dc3545;
-        margin-top: 0.25rem;
-    }
-
-    .error-message {
-        padding: 0.75rem;
-        background: #f8d7da;
-        color: #721c24;
-        border-radius: 4px;
-    }
-
-    .editor-footer {
-        display: flex;
-        justify-content: flex-end;
-        gap: 0.75rem;
-        padding: 1rem 1.5rem;
-        border-top: 1px solid var(--border-color, #ddd);
-        background: var(--light-bg, #f8f9fa);
-    }
-
-    /* 确认对话框 */
-    .confirm-dialog {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 1001;
-    }
-
-    .confirm-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.5);
-    }
-
-    .confirm-panel {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: var(--card-bg, white);
-        padding: 1.5rem;
-        border-radius: 8px;
-        min-width: 350px;
-        color: var(--text-primary, #333);
-    }
-
-    .confirm-panel h3 {
-        margin: 0 0 1rem 0;
-    }
-
-    .confirm-panel p {
-        margin: 0 0 1.5rem 0;
-        color: var(--text-secondary, #666);
-    }
-
-    .confirm-actions {
-        display: flex;
-        gap: 0.75rem;
-        justify-content: flex-end;
+    .import-switch {
+        margin-top: var(--spacing-3);
     }
 </style>
+
+@code {
+    private List<CommandTemplate> _allTemplates = [];
+    private List<CommandTemplate> _visible = [];
+
+    private string _searchInput = string.Empty;
+    private string _typeFilter = "all";
+    private string _sortColumn = "sort";
+    private bool _sortAscending = true;
+
+    private bool _isLoading = true;
+    private bool _isExporting;
+    private bool _isImporting;
+
+    private AppStatus? _status;
+    private bool _dataDirWritable;
+    private int _cleanupDays = 30;
+    private bool _isCleaning;
+
+    private CommandTemplate? _editorTemplate;
+    private bool _editorOpen;
+    private bool _editorIsSystem;
+
+    private CommandTemplate? _deleteTarget;
+    private bool _deleteOpen;
+    private bool _deleteBusy;
+
+    private bool _resetOpen;
+    private bool _resetBusy;
+
+    private bool _importOpen;
+    private string _importJson = string.Empty;
+    private bool _importAsSystem;
+
+    private bool IsBusy => _isExporting || _isImporting || _deleteBusy || _resetBusy || _isCleaning;
+
+    private int _systemCount => _allTemplates.Count(t => t.Type == TemplateType.System);
+    private int _userCount => _allTemplates.Count(t => t.Type == TemplateType.User);
+
+    /// <summary>内置预设占用了 0..N，新建模板从「最大值 + 10」开始，避免排序值撞车。</summary>
+    private int NextSortOrder => _allTemplates.Count == 0 ? 10 : _allTemplates.Max(t => t.SortOrder) + 10;
+
+    private bool DeleteTargetIsSystem => _deleteTarget?.Type == TemplateType.System;
+
+    private string _deleteTitle => DeleteTargetIsSystem ? "删除系统预设模板" : "删除模板";
+
+    private string _deleteMessage => _deleteTarget is null
+        ? string.Empty
+        : $"确定要删除「{_deleteTarget.Name}」吗？";
+
+    private string? _deleteDetail => _deleteTarget is null
+        ? null
+        : DeleteTargetIsSystem
+            ? "这是系统预设模板：删除后，只要它仍然存在于内置预设列表中，" +
+              "下次系统预设同步（应用升级或重置）时它还会重新出现。"
+            : "这是用户自建模板：删除只影响模板本身，已经用它执行过的任务记录不受影响。";
+
+    // ────────────────────────────────────────────────────────────────
+    // 初始化
+    // ────────────────────────────────────────────────────────────────
+
+    protected override async Task OnInitializedAsync()
+    {
+        // 诊断面板要显示实时的运行中/等待中数量，订阅后必须退订（Dispose）
+        TaskService.TaskStatusChanged += OnTaskStatusChanged;
+
+        await LoadAllAsync();
+        await LoadDiagnosticsAsync();
+    }
+
+    public void Dispose()
+    {
+        TaskService.TaskStatusChanged -= OnTaskStatusChanged;
+    }
+
+    private void OnTaskStatusChanged(object? sender, TaskStatusEventArgs e) => _ = InvokeAsync(StateHasChanged);
+
+    private async Task RefreshAllAsync()
+    {
+        await LoadAllAsync();
+        await LoadDiagnosticsAsync();
+    }
+
+    private async Task LoadAllAsync()
+    {
+        _isLoading = true;
+        try
+        {
+            _allTemplates = await TemplateService.GetAllTemplatesAsync();
+        }
+        catch (Exception ex)
+        {
+            _allTemplates = [];
+            Toast.Error($"加载模板失败：{ex.Message}");
+        }
+        finally
+        {
+            _isLoading = false;
+            RebuildView();
+        }
+    }
+
+    private async Task LoadDiagnosticsAsync()
+    {
+        try
+        {
+            _status = await AppStatusService.GetStatusAsync();
+        }
+        catch (Exception ex)
+        {
+            _status = null;
+            Toast.Warning($"读取运行状态失败：{ex.Message}");
+        }
+
+        try
+        {
+            _dataDirWritable = FileService.IsDirectoryWritable(AppPaths.DataDirectory);
+        }
+        catch (Exception ex)
+        {
+            _dataDirWritable = false;
+            Toast.Warning($"无法确认数据目录是否可写：{ex.Message}");
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 表格：筛选 / 排序
+    // ────────────────────────────────────────────────────────────────
+
+    private void RebuildView()
+    {
+        IEnumerable<CommandTemplate> query = _allTemplates;
+
+        if (_typeFilter == "system")
+        {
+            query = query.Where(t => t.Type == TemplateType.System);
+        }
+        else if (_typeFilter == "user")
+        {
+            query = query.Where(t => t.Type == TemplateType.User);
+        }
+
+        var search = _searchInput.Trim();
+        if (search.Length > 0)
+        {
+            query = query.Where(t => Matches(t, search));
+        }
+
+        var filtered = query.ToList();
+
+        _visible = _sortColumn switch
+        {
+            "name" => Order(filtered, t => t.Name, StringComparer.CurrentCulture),
+            "category" => Order(filtered, t => t.Category, StringComparer.CurrentCulture),
+            "type" => Order(filtered, t => (int)t.Type, null),
+            "extension" => Order(filtered, t => t.OutputExtension, StringComparer.OrdinalIgnoreCase),
+            "encoder" => Order(filtered, EncoderDisplay, StringComparer.CurrentCulture),
+            "updated" => Order(filtered, t => t.UpdatedAt, null),
+            _ => Order(filtered, t => t.SortOrder, null)
+        };
+    }
+
+    private List<CommandTemplate> Order<TKey>(
+        List<CommandTemplate> source,
+        Func<CommandTemplate, TKey> keySelector,
+        IComparer<TKey>? comparer)
+    {
+        var ordered = _sortAscending
+            ? source.OrderBy(keySelector, comparer)
+            : source.OrderByDescending(keySelector, comparer);
+
+        return ordered.ThenBy(t => t.Name, StringComparer.CurrentCulture).ToList();
+    }
+
+    private void ToggleSort(string column)
+    {
+        if (string.Equals(_sortColumn, column, StringComparison.Ordinal))
+        {
+            _sortAscending = !_sortAscending;
+        }
+        else
+        {
+            _sortColumn = column;
+            _sortAscending = column is "name" or "category" or "extension" or "encoder";
+        }
+        RebuildView();
+    }
+
+    private string AriaSort(string column) =>
+        !string.Equals(_sortColumn, column, StringComparison.Ordinal)
+            ? "none"
+            : _sortAscending ? "ascending" : "descending";
+
+    private string SortIndicator(string column) =>
+        !string.Equals(_sortColumn, column, StringComparison.Ordinal)
+            ? "↕"
+            : _sortAscending ? "▲" : "▼";
+
+    private void ClearFilters()
+    {
+        _searchInput = string.Empty;
+        _typeFilter = "all";
+        RebuildView();
+    }
+
+    private static bool Matches(CommandTemplate template, string search)
+    {
+        if (Contains(template.Name, search)) return true;
+        if (Contains(template.Description, search)) return true;
+        if (Contains(template.Category, search)) return true;
+        if (Contains(template.OutputExtension, search)) return true;
+        if (Contains(template.RequiredEncoder, search)) return true;
+        return template.Tags.Any(tag => Contains(tag, search));
+    }
+
+    private static bool Contains(string? source, string search) =>
+        !string.IsNullOrEmpty(source) && source.Contains(search, StringComparison.OrdinalIgnoreCase);
+
+    private static string EncoderDisplay(CommandTemplate template)
+    {
+        if (template.HardwareMode == HardwareAccelerationMode.None) return "不使用硬件加速";
+        var mode = template.HardwareMode == HardwareAccelerationMode.Required ? "必须" : "自动";
+        return $"{mode}：{EncoderLabel(template.RequiredEncoder)}";
+    }
+
+    private static string EncoderLabel(string? requiredEncoder)
+    {
+        if (string.IsNullOrWhiteSpace(requiredEncoder)) return "任意可用编码器";
+        var family = EncoderCatalog.Find(requiredEncoder)?.Family ?? requiredEncoder;
+        return EncoderCatalog.FamilyDisplayName(family);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 新建 / 编辑
+    // ────────────────────────────────────────────────────────────────
+
+    private void OpenCreateEditor()
+    {
+        _editorTemplate = new CommandTemplate
+        {
+            Type = TemplateType.System,
+            HardwareMode = HardwareAccelerationMode.None,
+            SortOrder = NextSortOrder
+        };
+        _editorIsSystem = true;
+        _editorOpen = true;
+    }
+
+    private void OpenEditEditor(CommandTemplate template)
+    {
+        if (template is null) return;
+        _editorTemplate = CloneTemplate(template);
+        _editorIsSystem = template.Type == TemplateType.System;
+        _editorOpen = true;
+    }
+
+    private void OnEditorOpenChanged(bool open)
+    {
+        _editorOpen = open;
+    }
+
+    private async Task OnTemplateSaved(CommandTemplate template)
+    {
+        _editorOpen = false;
+        _editorTemplate = null;
+        Toast.Success($"模板「{template?.Name}」已保存");
+        await LoadAllAsync();
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 删除
+    // ────────────────────────────────────────────────────────────────
+
+    private void RequestDelete(CommandTemplate template)
+    {
+        if (template is null) return;
+        _deleteTarget = template;
+        _deleteOpen = true;
+    }
+
+    private void OnDeleteOpenChanged(bool open)
+    {
+        _deleteOpen = open;
+        if (!open && !_deleteBusy) _deleteTarget = null;
+    }
+
+    private async Task ConfirmDeleteAsync()
+    {
+        var target = _deleteTarget;
+        if (target is null)
+        {
+            _deleteOpen = false;
+            return;
+        }
+
+        _deleteBusy = true;
+        try
+        {
+            var deleted = target.Type == TemplateType.System
+                ? await TemplateService.DeleteSystemTemplateAsync(target.Id)
+                : await TemplateService.DeleteTemplateAsync(target.Id);
+
+            if (deleted)
+            {
+                Toast.Success(target.Type == TemplateType.System
+                    ? $"已删除系统预设「{target.Name}」；只要它仍在内置预设列表中，下次预设同步或重置时就会重新出现。"
+                    : $"已删除用户模板「{target.Name}」");
+                _deleteOpen = false;
+                _deleteTarget = null;
+                await LoadAllAsync();
+            }
+            else
+            {
+                Toast.Error($"删除失败：服务返回未删除「{target.Name}」，它可能已经不存在，或类型不匹配。");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"删除模板失败：{ex.Message}");
+        }
+        finally
+        {
+            _deleteBusy = false;
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 重置系统预设
+    // ────────────────────────────────────────────────────────────────
+
+    private void RequestReset()
+    {
+        _resetOpen = true;
+    }
+
+    private void OnResetOpenChanged(bool open)
+    {
+        _resetOpen = open;
+    }
+
+    private async Task ConfirmResetAsync()
+    {
+        _resetBusy = true;
+        try
+        {
+            await TemplateService.ResetSystemTemplatesAsync();
+            _resetOpen = false;
+            Toast.Success($"系统预设模板已重置到 v{TemplateService.PresetVersion}（用户自建模板未受影响）");
+            await LoadAllAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"重置系统预设失败：{ex.Message}");
+        }
+        finally
+        {
+            _resetBusy = false;
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 历史清理
+    // ────────────────────────────────────────────────────────────────
+
+    private async Task CleanupHistoryAsync()
+    {
+        if (_isCleaning) return;
+
+        _isCleaning = true;
+        try
+        {
+            var days = Math.Clamp(_cleanupDays, 1, 3650);
+            var removed = await TaskService.CleanupHistoryAsync(DateTime.UtcNow.AddDays(-days));
+
+            Toast.Success(removed > 0
+                ? $"已清理 {removed} 条早于 {days} 天的历史任务记录（运行中/等待中的任务不受影响）"
+                : $"没有早于 {days} 天的历史任务记录需要清理");
+
+            await LoadDiagnosticsAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"清理历史任务失败：{ex.Message}");
+        }
+        finally
+        {
+            _isCleaning = false;
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 导入 / 导出
+    // ────────────────────────────────────────────────────────────────
+
+    private async Task ExportAsync()
+    {
+        if (_isExporting) return;
+
+        if (_allTemplates.Count == 0)
+        {
+            Toast.Warning("没有可导出的模板。");
+            return;
+        }
+
+        _isExporting = true;
+        try
+        {
+            var json = TemplateService.ExportToJson(_allTemplates);
+            var fileName = $"ffmpegwebui-templates-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var saved = await JS.InvokeAsync<bool>("ffui.saveTextFile", fileName, json, "application/json");
+
+            if (saved)
+            {
+                Toast.Success($"已导出 {_allTemplates.Count} 个模板到 {fileName}");
+            }
+            else
+            {
+                Toast.Error("导出失败：浏览器没有触发下载，请检查浏览器的下载权限或拦截设置。");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"导出失败：{ex.Message}");
+        }
+        finally
+        {
+            _isExporting = false;
+        }
+    }
+
+    private void OpenImport()
+    {
+        _importJson = string.Empty;
+        _importAsSystem = false;
+        _importOpen = true;
+    }
+
+    private void CloseImport()
+    {
+        _importOpen = false;
+    }
+
+    private void OnImportOpenChanged(bool open)
+    {
+        _importOpen = open;
+    }
+
+    private async Task ImportAsync()
+    {
+        if (_isImporting) return;
+
+        var json = (_importJson ?? string.Empty).Trim();
+        if (json.Length == 0)
+        {
+            Toast.Warning("请先粘贴模板 JSON 内容。");
+            return;
+        }
+
+        _isImporting = true;
+        try
+        {
+            var imported = await TemplateService.ImportFromJsonAsync(json, _importAsSystem);
+            if (imported > 0)
+            {
+                Toast.Success(_importAsSystem
+                    ? $"已导入 {imported} 个模板（作为系统预设）"
+                    : $"已导入 {imported} 个用户模板");
+                _importOpen = false;
+                _importJson = string.Empty;
+                await LoadAllAsync();
+            }
+            else
+            {
+                Toast.Warning("没有导入任何模板：JSON 里没有含 name 与 commandArgs 的模板条目。");
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            Toast.Error($"导入失败：{ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"导入失败：{ex.Message}");
+        }
+        finally
+        {
+            _isImporting = false;
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 工具
+    // ────────────────────────────────────────────────────────────────
+
+    private static CommandTemplate CloneTemplate(CommandTemplate source) => new()
+    {
+        Id = source.Id,
+        Name = source.Name,
+        Description = source.Description,
+        CommandArgs = source.CommandArgs,
+        Type = source.Type,
+        Category = source.Category,
+        SupportedInputFormats = [.. source.SupportedInputFormats],
+        OutputExtension = source.OutputExtension,
+        TargetCodec = source.TargetCodec,
+        RequiresHardwareAcceleration = source.RequiresHardwareAcceleration,
+        HardwareMode = source.HardwareMode,
+        RequiredEncoder = source.RequiredEncoder,
+        Parameters = source.Parameters.Select(p => new TemplateParameter
+        {
+            Name = p.Name,
+            Label = p.Label,
+            Description = p.Description,
+            Kind = p.Kind,
+            DefaultValue = p.DefaultValue,
+            Options = p.Options.Select(o => new TemplateParameterOption(o.Value, o.Label, o.Description)).ToList(),
+            Min = p.Min,
+            Max = p.Max,
+            TrueValue = p.TrueValue,
+            FalseValue = p.FalseValue
+        }).ToList(),
+        Tags = [.. source.Tags],
+        IsRecommended = source.IsRecommended,
+        PresetVersion = source.PresetVersion,
+        CreatedAt = source.CreatedAt,
+        UpdatedAt = source.UpdatedAt,
+        SortOrder = source.SortOrder
+    };
+}

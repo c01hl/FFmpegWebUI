@@ -1,511 +1,1020 @@
 @page "/templates"
-@using FFmpegWebUI.Models
-@using FFmpegWebUI.Services
-@using FFmpegWebUI.Components.Shared
+@using LiteDB
 @inject ITemplateService TemplateService
+@inject IHardwareDetectionService HardwareDetection
+@inject IToastService Toast
+@inject NavigationManager Navigation
 @inject IJSRuntime JS
+@implements IDisposable
 @rendermode InteractiveServer
 
-<PageTitle>模板管理 - FFmpeg Web UI</PageTitle>
+<PageTitle>模板管理 - @AppInfo.Name</PageTitle>
 
-<div class="templates-container">
-    <div class="page-header">
-        <h1>📋 模板管理</h1>
-        <button class="btn-create" @onclick="CreateTemplate">
+<div class="ffui-container">
+    <div class="page-head">
+        <div class="page-head-text">
+            <h1>📋 模板管理</h1>
+            <p class="page-sub">浏览、筛选并预览模板；点「选择」会带着该模板打开转换页面。</p>
+        </div>
+        <div class="head-counts">
+            <span class="ffui-badge">全部 @_templates.Count</span>
+            <span class="ffui-badge ffui-badge-info">系统预设 @_systemCount</span>
+            <span class="ffui-badge ffui-badge-primary">我的模板 @_userCount</span>
+        </div>
+    </div>
+
+    <div class="alert-stack">
+        @if (!string.IsNullOrEmpty(_syncSummary))
+        {
+            <div class="ffui-alert @(_syncChanged ? "ffui-alert-success" : "ffui-alert-info")" role="status">
+                <span aria-hidden="true">@(_syncChanged ? "✅" : "ℹ️")</span>
+                <span>@_syncSummary（每次打开本页都会自动同步一次系统预设）</span>
+            </div>
+        }
+
+        <div class="ffui-alert @(_capabilityWarning ? "ffui-alert-warning" : "ffui-alert-info")" role="status">
+            <span aria-hidden="true">@(_capabilityWarning ? "⚠️" : "🚀")</span>
+            <span>@_capabilityText</span>
+        </div>
+    </div>
+
+    <div class="head-actions">
+        <button type="button" class="ffui-btn ffui-btn-primary" @onclick="OpenCreateEditor">
             ➕ 创建模板
+        </button>
+        <button type="button" class="ffui-btn" @onclick="ExportAsync" disabled="@(_isExporting || _templates.Count == 0)">
+            ⬇️ 导出全部
+        </button>
+        <button type="button" class="ffui-btn" @onclick="ExportFilteredAsync"
+                disabled="@(_isExporting || _cards.Count == 0)">
+            ⬇️ 导出当前筛选结果（@_cards.Count）
+        </button>
+        <button type="button" class="ffui-btn" @onclick="OpenImport">
+            📥 导入
         </button>
     </div>
 
-    <div class="filter-bar">
-        <input type="text" 
-               placeholder="搜索模板..." 
-               @bind="_searchText"
-               @bind:event="oninput" />
+    <div class="ffui-panel toolbar">
+        <div class="toolbar-row">
+            <label class="field search-field">
+                <span class="field-label">搜索</span>
+                <input type="search" placeholder="搜索名称、描述、分类、标签…"
+                       aria-label="搜索模板" value="@_searchInput" @oninput="OnSearchInputAsync" />
+            </label>
 
-        <div class="category-filter">
-            <button class="filter-btn @(_selectedCategory == null ? "active" : "")"
-                    @onclick="() => FilterByCategory(null)">
-                全部
-            </button>
-            @foreach (var category in _categories)
-            {
-                <button class="filter-btn @(_selectedCategory == category ? "active" : "")"
-                        @onclick="() => FilterByCategory(category)">
-                    @category
+            <label class="field">
+                <span class="field-label">分类</span>
+                <select aria-label="按分类筛选" @bind="_selectedCategory" @bind:after="RebuildView">
+                    <option value="">全部分类</option>
+                    @foreach (var category in _categories)
+                    {
+                        <option value="@category">@category</option>
+                    }
+                </select>
+            </label>
+
+            <label class="field">
+                <span class="field-label">排序</span>
+                <select aria-label="排序方式" @bind="_sortMode" @bind:after="RebuildView">
+                    <option value="recommended">推荐优先</option>
+                    <option value="name">名称</option>
+                    <option value="updated">最近修改</option>
+                </select>
+            </label>
+
+            <label class="switch">
+                <input type="checkbox" @bind="_onlyAvailable" @bind:after="RebuildView" />
+                只看本机可用的模板
+            </label>
+
+            <div class="seg" role="group" aria-label="视图切换">
+                <button type="button" class="ffui-btn ffui-btn-sm @(_layout == "flat" ? "ffui-btn-primary" : "")"
+                        aria-pressed='@(_layout == "flat")' aria-label="平铺显示" title="平铺显示"
+                        @onclick='() => SetLayout("flat")'>
+                    ▦ 平铺
                 </button>
+                <button type="button" class="ffui-btn ffui-btn-sm @(_layout == "group" ? "ffui-btn-primary" : "")"
+                        aria-pressed='@(_layout == "group")' aria-label="按分类分组显示" title="按分类分组显示"
+                        @onclick='() => SetLayout("group")'>
+                    ☰ 分组
+                </button>
+            </div>
+        </div>
+
+        <p class="result-count" aria-live="polite">
+            @if (_isLoading)
+            {
+                <span>正在加载模板…</span>
             }
-        </div>
-
-        <div class="type-filter">
-            <label>
-                <input type="checkbox" @bind="_showSystem" /> 显示预设
-            </label>
-            <label>
-                <input type="checkbox" @bind="_showUser" /> 显示自定义
-            </label>
-        </div>
-
-        <div class="view-toggle">
-            <button class="view-btn @(_viewMode == "grid" ? "active" : "")"
-                    @onclick='() => _viewMode = "grid"' title="网格视图">
-                ▦
-            </button>
-            <button class="view-btn @(_viewMode == "list" ? "active" : "")"
-                    @onclick='() => _viewMode = "list"' title="列表视图">
-                ☰
-            </button>
-        </div>
+            else
+            {
+                <span>@_cards.Count 个模板符合当前条件（共 @_templates.Count 个）</span>
+            }
+        </p>
     </div>
 
     @if (_isLoading)
     {
-        <div class="loading">加载中...</div>
-    }
-    else if (_filteredTemplates.Count == 0)
-    {
-        <div class="empty-state">
-            <p>没有找到匹配的模板</p>
-            <button class="btn-create" @onclick="CreateTemplate">创建第一个模板</button>
+        <div class="ffui-loading-row" aria-busy="true">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>正在加载模板…</span>
         </div>
     }
-    else
+    else if (_cards.Count == 0)
     {
-        <div class="@(_viewMode == "list" ? "templates-list" : "templates-grid")">
-            @foreach (var template in _filteredTemplates)
+        <div class="ffui-panel ffui-empty-state">
+            @if (_templates.Count == 0)
             {
-                <TemplateCard Template="template"
-                              ViewMode="@_viewMode"
-                              OnSelect="SelectTemplate"
-                              OnEdit="EditTemplate"
-                              OnDelete="DeleteTemplate"
-                              OnView="ViewTemplate"
-                              OnCopy="CopyTemplate" />
+                <p>还没有任何模板，先创建一个吧。</p>
+                <button type="button" class="ffui-btn ffui-btn-primary" @onclick="OpenCreateEditor">创建第一个模板</button>
+            }
+            else
+            {
+                <p>没有找到匹配的模板。</p>
+                <button type="button" class="ffui-btn" @onclick="ResetFilters">清除筛选条件</button>
             }
         </div>
     }
-
-    @if (!string.IsNullOrEmpty(_message))
+    else if (_layout == "group")
     {
-        <div class="message @_messageClass">@_message</div>
+        @foreach (var group in _groups)
+        {
+            <section class="group" @key="group.Category">
+                <h2 class="ffui-section-title">
+                    @group.Category
+                    <span class="ffui-badge">@group.Templates.Count</span>
+                </h2>
+                <div class="template-grid">
+                    @foreach (var card in group.Templates)
+                    {
+                        <TemplateCard @key="card.Template.Id"
+                                      Template="card.Template"
+                                      IsSelected="@(_selectedId == card.Template.Id)"
+                                      IsAvailable="card.IsAvailable"
+                                      UnavailableReason="card.UnavailableReason"
+                                      SelectedEncoderName="card.SelectedEncoderName"
+                                      ShowSystemBadges="true"
+                                      OnSelect="SelectTemplateAsync"
+                                      OnEdit="OpenEditEditor"
+                                      OnDelete="RequestDelete"
+                                      OnView="OpenViewer"
+                                      OnCopy="CopyTemplateAsync" />
+                    }
+                </div>
+            </section>
+        }
+    }
+    else
+    {
+        <div class="template-grid">
+            @foreach (var card in _cards)
+            {
+                <TemplateCard @key="card.Template.Id"
+                              Template="card.Template"
+                              IsSelected="@(_selectedId == card.Template.Id)"
+                              IsAvailable="card.IsAvailable"
+                              UnavailableReason="card.UnavailableReason"
+                              SelectedEncoderName="card.SelectedEncoderName"
+                              ShowSystemBadges="true"
+                              OnSelect="SelectTemplateAsync"
+                              OnEdit="OpenEditEditor"
+                              OnDelete="RequestDelete"
+                              OnView="OpenViewer"
+                              OnCopy="CopyTemplateAsync" />
+            }
+        </div>
     }
 </div>
 
-<TemplateEditor @ref="_editor" OnSaved="OnTemplateSaved" />
-<TemplateDetailViewer @ref="_detailViewer" OnCopy="CopyTemplate" OnEdit="EditTemplate" />
+<TemplateDetailViewer Template="_viewing"
+                      IsOpen="_viewerOpen"
+                      IsOpenChanged="OnViewerOpenChanged"
+                      OnCopy="CopyTemplateAsync"
+                      OnEdit="OpenEditEditor"
+                      OnUse="SelectTemplateAsync" />
 
-@if (_showDeleteConfirm)
-{
-    <div class="confirm-dialog">
-        <div class="confirm-overlay" @onclick="CancelDelete"></div>
-        <div class="confirm-panel">
-            <h3>确认删除</h3>
-            <p>确定要删除模板 "@_templateToDelete?.Name" 吗？此操作不可撤销。</p>
-            <div class="confirm-actions">
-                <button class="btn-secondary" @onclick="CancelDelete">取消</button>
-                <button class="btn-danger" @onclick="ConfirmDelete">删除</button>
-            </div>
+<TemplateEditor Template="_editorTemplate"
+                IsOpen="_editorOpen"
+                IsOpenChanged="OnEditorOpenChanged"
+                IsSystem="_editorIsSystem"
+                OnSaved="OnTemplateSaved" />
+
+<Modal IsOpen="_importOpen" IsOpenChanged="OnImportOpenChanged" Title="导入模板" Size="lg"
+       DisableClose="@_isImporting" CloseOnBackdrop="@(!_isImporting)">
+    <p class="modal-hint">
+        把「导出」得到的 JSON 内容粘贴到下面。浏览器出于安全限制不允许页面直接读取剪贴板，
+        请手动粘贴（⌘/Ctrl + V）。
+    </p>
+    <textarea class="import-json" rows="10" aria-label="模板 JSON 内容"
+              placeholder="在此粘贴包含 templates 数组的 JSON"
+              @bind="_importJson" @bind:event="oninput"></textarea>
+
+    <label class="switch import-switch">
+        <input type="checkbox" @bind="_importAsSystem" />
+        导入为系统模板（高级选项）
+    </label>
+    @if (_importAsSystem)
+    {
+        <div class="ffui-alert ffui-alert-warning" role="alert">
+            <span aria-hidden="true">⚠️</span>
+            <span>
+                导入为系统模板后，这些模板会进入「系统预设」分组，并可能在后续的系统预设同步或重置时
+                被内置预设覆盖、删除。只在明确知道用途时启用。
+            </span>
         </div>
+    }
+
+    <div class="ffui-modal-footer">
+        <button type="button" class="ffui-btn" disabled="@_isImporting" @onclick="CloseImport">取消</button>
+        <button type="button" class="ffui-btn ffui-btn-primary" disabled="@_isImporting" @onclick="ImportAsync">
+            @if (_isImporting)
+            {
+                <span class="spinner" aria-hidden="true"></span>
+            }
+            导入
+        </button>
     </div>
-}
+</Modal>
+
+<ConfirmDialog IsOpen="_deleteOpen"
+               IsOpenChanged="OnDeleteOpenChanged"
+               Danger="true"
+               Title="@_deleteTitle"
+               Message="@_deleteMessage"
+               Detail="@_deleteDetail"
+               ConfirmText="@_deleteConfirmText"
+               OnConfirm="ConfirmDeleteAsync" />
+
+<style>
+    .page-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+        margin-bottom: var(--spacing-4);
+    }
+
+    .page-head h1 {
+        margin: 0;
+    }
+
+    .page-sub {
+        margin: 0.25rem 0 0;
+        color: var(--text-muted);
+        font-size: 0.88rem;
+    }
+
+    .head-counts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-2);
+    }
+
+    .alert-stack {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        margin-bottom: var(--spacing-4);
+    }
+
+    .head-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-2);
+        margin-bottom: var(--spacing-4);
+    }
+
+    .toolbar {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        margin-bottom: var(--spacing-4);
+    }
+
+    .toolbar-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: var(--spacing-3);
+    }
+
+    .field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+        min-width: 170px;
+    }
+
+    .field-label {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+    }
+
+    .search-field {
+        flex: 1 1 260px;
+    }
+
+    .switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.9rem;
+        color: var(--text-primary);
+        cursor: pointer;
+        padding-bottom: 0.35rem;
+    }
+
+    .seg {
+        display: inline-flex;
+        gap: var(--spacing-1);
+        margin-left: auto;
+    }
+
+    .result-count {
+        margin: 0;
+        color: var(--text-secondary);
+        font-size: 0.88rem;
+    }
+
+    .template-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: var(--spacing-3);
+    }
+
+    .group {
+        margin-bottom: var(--spacing-5);
+    }
+
+    .modal-hint {
+        margin: 0 0 var(--spacing-3);
+        color: var(--text-secondary);
+        font-size: 0.88rem;
+    }
+
+    .import-json {
+        font-family: var(--font-mono);
+        font-size: 0.85rem;
+    }
+
+    .import-switch {
+        margin-top: var(--spacing-3);
+        padding-bottom: 0;
+    }
+</style>
 
 @code {
+    private sealed record CardState(
+        CommandTemplate Template,
+        bool? IsAvailable,
+        string? UnavailableReason,
+        string? SelectedEncoderName);
+
+    private sealed class TemplateGroup(string category)
+    {
+        public string Category { get; } = category;
+        public List<CardState> Templates { get; } = [];
+    }
+
     private List<CommandTemplate> _templates = [];
     private List<string> _categories = [];
-    private string _searchText = string.Empty;
-    private string? _selectedCategory;
-    private bool _showSystem = true;
-    private bool _showUser = true;
-    private bool _isLoading = true;
-    private string _message = string.Empty;
-    private string _messageClass = string.Empty;
-    private string _viewMode = "grid";
-    private TemplateEditor? _editor;
-    private TemplateDetailViewer? _detailViewer;
-    private bool _showDeleteConfirm;
-    private CommandTemplate? _templateToDelete;
+    private List<CardState> _cards = [];
+    private List<TemplateGroup> _groups = [];
 
-    private List<CommandTemplate> _filteredTemplates => _templates
-        .Where(t => _selectedCategory == null || t.Category == _selectedCategory)
-        .Where(t => (_showSystem && t.Type == TemplateType.System) || (_showUser && t.Type == TemplateType.User))
-        .Where(t => string.IsNullOrEmpty(_searchText) ||
-                    t.Name.Contains(_searchText, StringComparison.OrdinalIgnoreCase) ||
-                    t.Description.Contains(_searchText, StringComparison.OrdinalIgnoreCase))
-        .OrderBy(t => t.Type)
-        .ThenBy(t => t.SortOrder)
-        .ToList();
+    private HardwareDetectionReport? _report;
+    private bool _hardwareDetected;
+    private HashSet<string> _availableEncoders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<(string Codec, string Required), string?> _encoderCache = new();
+    private bool _encoderCacheWarned;
+
+    private string _syncSummary = string.Empty;
+    private bool _syncChanged;
+    private string _capabilityText = "正在检测本机可用的硬件编码器…";
+    private bool _capabilityWarning;
+
+    private string _searchInput = string.Empty;
+    private string _searchText = string.Empty;
+    private CancellationTokenSource? _searchDebounce;
+    private string _selectedCategory = string.Empty;
+    private string _sortMode = "recommended";
+    private string _layout = "flat";
+    private bool _onlyAvailable;
+    private bool _isLoading = true;
+    private bool _isExporting;
+    private bool _isImporting;
+
+    private CommandTemplate? _editorTemplate;
+    private bool _editorOpen;
+    private bool _editorIsSystem;
+
+    private CommandTemplate? _viewing;
+    private bool _viewerOpen;
+
+    private CommandTemplate? _deleteTarget;
+    private bool _deleteOpen;
+
+    private bool _importOpen;
+    private string _importJson = string.Empty;
+    private bool _importAsSystem;
+
+    private ObjectId? _selectedId;
+
+    private int _systemCount => _templates.Count(t => t.Type == TemplateType.System);
+    private int _userCount => _templates.Count(t => t.Type == TemplateType.User);
+
+    private bool DeleteTargetIsSystem => _deleteTarget?.Type == TemplateType.System;
+
+    private string _deleteTitle => DeleteTargetIsSystem ? "删除系统预设模板" : "删除模板";
+
+    private string _deleteMessage => _deleteTarget is null
+        ? string.Empty
+        : DeleteTargetIsSystem
+            ? $"「{_deleteTarget.Name}」是系统预设模板，无法在这里删除。"
+            : $"确定要删除模板「{_deleteTarget.Name}」吗？此操作不可撤销。";
+
+    private string? _deleteDetail => _deleteTarget is null
+        ? null
+        : DeleteTargetIsSystem
+            ? "删除系统预设请前往「预设模板管理」页面；即使在那里删除，只要它仍然存在于内置预设列表中，" +
+              "下次系统预设同步（应用升级或重置）时它还会重新出现。"
+            : "删除只影响模板本身，已经用它执行过的任务记录不会受影响。";
+
+    private string _deleteConfirmText => DeleteTargetIsSystem ? "前往管理页面" : "删除";
+
+    // ────────────────────────────────────────────────────────────────
+    // 初始化
+    // ────────────────────────────────────────────────────────────────
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadTemplates();
-    }
-
-    private async Task LoadTemplates()
-    {
-        _isLoading = true;
-        StateHasChanged();
-
         try
         {
-            await TemplateService.InitializeSystemTemplatesAsync();
+            var sync = await TemplateService.InitializeSystemTemplatesAsync();
+            _syncSummary = sync?.Summary ?? $"系统模板已是最新（预设 v{TemplateService.PresetVersion}）";
+            _syncChanged = sync?.Changed == true;
+        }
+        catch (Exception ex)
+        {
+            _syncSummary = string.Empty;
+            Toast.Error($"同步系统预设模板失败：{ex.Message}");
+        }
+
+        await DetectHardwareAsync();
+        await LoadTemplatesAsync();
+    }
+
+    public void Dispose()
+    {
+        _searchDebounce?.Cancel();
+        _searchDebounce?.Dispose();
+        _searchDebounce = null;
+    }
+
+    private async Task DetectHardwareAsync()
+    {
+        try
+        {
+            _report = await HardwareDetection.DetectAsync();
+            _availableEncoders = _report.Encoders
+                .Where(e => e.IsAvailable)
+                .Select(e => e.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _hardwareDetected = true;
+
+            _capabilityText = string.IsNullOrWhiteSpace(_report.Summary)
+                ? (_report.HasHardwareAcceleration
+                    ? $"检测到 {_report.AvailableHardwareEncoders.Count} 个可用的硬件编码器。"
+                    : "本机未检测到可用的硬件编码器，仅软件编码可用。")
+                : _report.Summary;
+            _capabilityWarning = !_report.HasHardwareAcceleration;
+
+            if (!string.IsNullOrWhiteSpace(_report.FFmpegVersion))
+            {
+                _capabilityText += $"（检测于 FFmpeg {_report.FFmpegVersion}）";
+            }
+        }
+        catch (Exception ex)
+        {
+            _report = null;
+            _hardwareDetected = false;
+            _availableEncoders.Clear();
+            _capabilityText = $"硬件检测失败，暂时无法判断哪些模板可在本机运行：{ex.Message}";
+            _capabilityWarning = true;
+            Toast.Warning($"硬件检测失败，模板可用性将显示为「未知」：{ex.Message}");
+        }
+    }
+
+    private async Task LoadTemplatesAsync()
+    {
+        _isLoading = true;
+        try
+        {
             _templates = await TemplateService.GetAllTemplatesAsync();
             _categories = await TemplateService.GetCategoriesAsync();
+            await EnsureEncoderCacheAsync();
+        }
+        catch (Exception ex)
+        {
+            _templates = [];
+            _categories = [];
+            Toast.Error($"加载模板失败：{ex.Message}");
         }
         finally
         {
             _isLoading = false;
+            RebuildView();
         }
     }
 
-    private void FilterByCategory(string? category)
+    /// <summary>
+    /// 硬件检测完成后一次性算好「自动模式实际会用到的编码器」，
+    /// 渲染每张卡片时只查字典，不再逐行调用服务。
+    /// </summary>
+    private async Task EnsureEncoderCacheAsync()
     {
-        _selectedCategory = category;
-    }
+        if (!_hardwareDetected) return;
 
-    private async Task CreateTemplate()
-    {
-        if (_editor != null)
+        foreach (var template in _templates)
         {
-            await _editor.OpenForCreate();
+            if (template.HardwareMode != HardwareAccelerationMode.Auto) continue;
+            if (!UsesEncoderPlaceholder(template)) continue;
+
+            var codec = ResolveCodec(template);
+            var key = (Codec: codec, Required: template.RequiredEncoder ?? string.Empty);
+            if (_encoderCache.ContainsKey(key)) continue;
+
+            try
+            {
+                _encoderCache[key] = await HardwareDetection.GetRecommendedEncoderAsync(codec, template.RequiredEncoder);
+            }
+            catch (Exception ex)
+            {
+                _encoderCache[key] = null;
+                if (!_encoderCacheWarned)
+                {
+                    _encoderCacheWarned = true;
+                    Toast.Warning($"无法推算模板实际使用的编码器：{ex.Message}");
+                }
+            }
         }
     }
 
-    private async Task EditTemplate(CommandTemplate template)
+    // ────────────────────────────────────────────────────────────────
+    // 列表：筛选 / 排序 / 分组
+    // ────────────────────────────────────────────────────────────────
+
+    private void RebuildView()
     {
-        if (_editor != null)
+        IEnumerable<CommandTemplate> query = _templates;
+
+        var search = _searchText.Trim();
+        if (search.Length > 0)
         {
-            await _editor.OpenForEdit(template);
+            query = query.Where(t => Matches(t, search));
         }
+
+        if (!string.IsNullOrWhiteSpace(_selectedCategory))
+        {
+            query = query.Where(t => string.Equals(t.Category, _selectedCategory, StringComparison.CurrentCulture));
+        }
+
+        var cards = query.Select(BuildCardState).ToList();
+
+        // 「只看本机可用」只保留已经确认可用的模板（未知状态不算可用）
+        if (_onlyAvailable)
+        {
+            cards = cards.Where(c => c.IsAvailable == true).ToList();
+        }
+
+        _cards = _sortMode switch
+        {
+            "name" => cards
+                .OrderBy(c => c.Template.Name, StringComparer.CurrentCulture)
+                .ToList(),
+            "updated" => cards
+                .OrderByDescending(c => c.Template.UpdatedAt)
+                .ThenBy(c => c.Template.Name, StringComparer.CurrentCulture)
+                .ToList(),
+            _ => cards
+                .OrderByDescending(c => c.Template.IsRecommended)
+                .ThenBy(c => c.Template.SortOrder)
+                .ThenBy(c => c.Template.Name, StringComparer.CurrentCulture)
+                .ToList()
+        };
+
+        var groups = new List<TemplateGroup>();
+        foreach (var card in _cards)
+        {
+            var category = string.IsNullOrWhiteSpace(card.Template.Category) ? "未分类" : card.Template.Category;
+            var group = groups.FirstOrDefault(g => string.Equals(g.Category, category, StringComparison.CurrentCulture));
+            if (group is null)
+            {
+                group = new TemplateGroup(category);
+                groups.Add(group);
+            }
+            group.Templates.Add(card);
+        }
+        _groups = groups;
     }
 
-    private void SelectTemplate(CommandTemplate template)
+    private CardState BuildCardState(CommandTemplate template)
     {
-        // 导航到转换页面并选择此模板
-        // 这里可以存储选择或直接导航
-        _message = $"已选择模板: {template.Name}";
-        _messageClass = "info";
+        // 必须使用硬件加速：只有本机确实存在该族编码器时才算可用
+        if (template.HardwareMode == HardwareAccelerationMode.Required)
+        {
+            var required = template.RequiredEncoder;
+            if (string.IsNullOrWhiteSpace(required))
+            {
+                return new CardState(template, false,
+                    "该模板要求硬件加速，但没有指定编码器族，无法在本机使用。", null);
+            }
+
+            if (!_hardwareDetected)
+            {
+                return new CardState(template, null,
+                    "硬件检测未完成，无法确认该模板是否可以在本机运行。", null);
+            }
+
+            if (IsEncoderSatisfied(required))
+            {
+                var member = EncoderCatalog.ExpandFamily(required)
+                    .FirstOrDefault(name => _availableEncoders.Contains(name));
+                return new CardState(template, true, null, DisplayEncoderName(member));
+            }
+
+            var family = EncoderCatalog.Find(required)?.Family ?? required;
+            return new CardState(template, false,
+                $"未检测到可用的 {EncoderCatalog.FamilyDisplayName(family)} 编码器，本机无法使用该模板。", null);
+        }
+
+        // 自动模式：硬件不可用时自动回退到软件编码，所以始终可用
+        if (template.HardwareMode == HardwareAccelerationMode.Auto)
+        {
+            string? selected = null;
+            if (_hardwareDetected && UsesEncoderPlaceholder(template))
+            {
+                var key = (Codec: ResolveCodec(template), Required: template.RequiredEncoder ?? string.Empty);
+                if (_encoderCache.TryGetValue(key, out var name) && !string.IsNullOrEmpty(name))
+                {
+                    selected = DisplayEncoderName(name);
+                }
+            }
+            return new CardState(template, true, null, selected);
+        }
+
+        return new CardState(template, true, null, null);
     }
 
-    private void ViewTemplate(CommandTemplate template)
+    private static bool Matches(CommandTemplate template, string search)
     {
-        _detailViewer?.Open(template);
+        if (Contains(template.Name, search)) return true;
+        if (Contains(template.Description, search)) return true;
+        if (Contains(template.Category, search)) return true;
+        if (Contains(template.OutputExtension, search)) return true;
+        if (Contains(template.RequiredEncoder, search)) return true;
+        return template.Tags.Any(tag => Contains(tag, search));
     }
 
-    private async Task CopyTemplate(CommandTemplate template)
+    private static bool Contains(string? source, string search) =>
+        !string.IsNullOrEmpty(source) && source.Contains(search, StringComparison.OrdinalIgnoreCase);
+
+    private static bool UsesEncoderPlaceholder(CommandTemplate template)
     {
+        var args = template.CommandArgs ?? string.Empty;
+        return args.Contains("{encoder}", StringComparison.OrdinalIgnoreCase)
+            || args.Contains("{quality_args}", StringComparison.OrdinalIgnoreCase)
+            || args.Contains("{preset_args}", StringComparison.OrdinalIgnoreCase)
+            || args.Contains("{hwupload_args}", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ResolveCodec(CommandTemplate template)
+    {
+        var codec = string.IsNullOrWhiteSpace(template.TargetCodec) ? template.OutputExtension : template.TargetCodec;
+        return HardwareDetectionService.NormalizeCodec(codec);
+    }
+
+    private bool IsEncoderSatisfied(string required) =>
+        EncoderCatalog.ExpandFamily(required).Any(name => _availableEncoders.Contains(name));
+
+    private static string? DisplayEncoderName(string? encoderName) =>
+        string.IsNullOrEmpty(encoderName) ? null : EncoderCatalog.Find(encoderName)?.DisplayName ?? encoderName;
+
+    // ────────────────────────────────────────────────────────────────
+    // 交互
+    // ────────────────────────────────────────────────────────────────
+
+    private async Task OnSearchInputAsync(ChangeEventArgs args)
+    {
+        _searchInput = args.Value?.ToString() ?? string.Empty;
+
+        var previous = _searchDebounce;
+        previous?.Cancel();
+        previous?.Dispose();
+
+        var cts = new CancellationTokenSource();
+        _searchDebounce = cts;
+
         try
         {
-            var newTemplate = await TemplateService.CopyTemplateAsync(template.Id);
-            _message = $"✓ 模板已复制为 \"{newTemplate.Name}\"";
-            _messageClass = "success";
-            await LoadTemplates();
+            await Task.Delay(250, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (cts.IsCancellationRequested) return;
+
+        _searchText = _searchInput;
+        RebuildView();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void ResetFilters()
+    {
+        _searchInput = string.Empty;
+        _searchText = string.Empty;
+        _selectedCategory = string.Empty;
+        _onlyAvailable = false;
+        RebuildView();
+    }
+
+    private void SetLayout(string layout)
+    {
+        _layout = layout;
+        RebuildView();
+    }
+
+    private void OpenCreateEditor()
+    {
+        _editorTemplate = new CommandTemplate();
+        _editorIsSystem = false;
+        _editorOpen = true;
+    }
+
+    private void OpenEditEditor(CommandTemplate template)
+    {
+        if (template is null) return;
+        _editorTemplate = CloneTemplate(template);
+        _editorIsSystem = template.Type == TemplateType.System;
+        _editorOpen = true;
+    }
+
+    private void OnEditorOpenChanged(bool open)
+    {
+        _editorOpen = open;
+    }
+
+    private async Task OnTemplateSaved(CommandTemplate template)
+    {
+        _editorOpen = false;
+        Toast.Success($"模板「{template?.Name}」已保存");
+        await LoadTemplatesAsync();
+    }
+
+    private void OpenViewer(CommandTemplate template)
+    {
+        if (template is null) return;
+        _viewing = template;
+        _viewerOpen = true;
+    }
+
+    private void OnViewerOpenChanged(bool open)
+    {
+        _viewerOpen = open;
+    }
+
+    /// <summary>TPL-1：带着模板跳转到转换页面（/convert?template=&lt;id&gt;）。</summary>
+    private async Task SelectTemplateAsync(CommandTemplate template)
+    {
+        if (template is null) return;
+
+        _selectedId = template.Id;
+        Toast.Success($"已打开转换页面，模板已预选：{template.Name}");
+
+        try
+        {
+            Navigation.NavigateTo($"/convert?template={template.Id}");
         }
         catch (Exception ex)
         {
-            _message = $"复制失败: {ex.Message}";
-            _messageClass = "error";
+            Toast.Error($"打开转换页面失败：{ex.Message}");
         }
+
+        await Task.CompletedTask;
     }
 
-    private void DeleteTemplate(CommandTemplate template)
+    private async Task CopyTemplateAsync(CommandTemplate template)
     {
-        _templateToDelete = template;
-        _showDeleteConfirm = true;
-    }
-
-    private void CancelDelete()
-    {
-        _showDeleteConfirm = false;
-        _templateToDelete = null;
-    }
-
-    private async Task ConfirmDelete()
-    {
-        if (_templateToDelete == null) return;
-
-        var success = await TemplateService.DeleteTemplateAsync(_templateToDelete.Id);
-        
-        if (success)
+        if (template is null) return;
+        try
         {
-            _message = $"模板 \"{_templateToDelete.Name}\" 已删除";
-            _messageClass = "success";
-            await LoadTemplates();
+            var copy = await TemplateService.CopyTemplateAsync(template.Id);
+            Toast.Success($"已复制为「{copy.Name}」");
+            await LoadTemplatesAsync();
         }
-        else
+        catch (Exception ex)
         {
-            _message = "删除失败，系统模板不可删除";
-            _messageClass = "error";
+            Toast.Error($"复制模板失败：{ex.Message}");
+        }
+    }
+
+    private void RequestDelete(CommandTemplate template)
+    {
+        if (template is null) return;
+        _deleteTarget = template;
+        _deleteOpen = true;
+    }
+
+    private void OnDeleteOpenChanged(bool open)
+    {
+        _deleteOpen = open;
+        if (!open) _deleteTarget = null;
+    }
+
+    private async Task ConfirmDeleteAsync()
+    {
+        var target = _deleteTarget;
+        _deleteOpen = false;
+        _deleteTarget = null;
+
+        if (target is null) return;
+
+        if (target.Type == TemplateType.System)
+        {
+            Toast.Warning("系统预设模板不能在这里删除，已跳转到「预设模板管理」页面。");
+            try
+            {
+                Navigation.NavigateTo("/templates-admin");
+            }
+            catch (Exception ex)
+            {
+                Toast.Error($"跳转失败，请手动打开 /templates-admin：{ex.Message}");
+            }
+            return;
         }
 
-        _showDeleteConfirm = false;
-        _templateToDelete = null;
+        try
+        {
+            var deleted = await TemplateService.DeleteTemplateAsync(target.Id);
+            if (deleted)
+            {
+                Toast.Success($"模板「{target.Name}」已删除");
+                await LoadTemplatesAsync();
+            }
+            else
+            {
+                Toast.Error($"删除失败：服务没有删除「{target.Name}」，它可能已经被删除，或它是系统预设模板。");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"删除模板失败：{ex.Message}");
+        }
     }
 
-    private async Task OnTemplateSaved()
+    // ────────────────────────────────────────────────────────────────
+    // 导入 / 导出
+    // ────────────────────────────────────────────────────────────────
+
+    private Task ExportAsync() => ExportCoreAsync(_templates, filtered: false);
+
+    private Task ExportFilteredAsync() => ExportCoreAsync(_cards.Select(c => c.Template).ToList(), filtered: true);
+
+    private async Task ExportCoreAsync(List<CommandTemplate> templates, bool filtered)
     {
-        _message = "模板已保存";
-        _messageClass = "success";
-        await LoadTemplates();
+        if (_isExporting) return;
+
+        if (templates.Count == 0)
+        {
+            Toast.Warning("没有可导出的模板。");
+            return;
+        }
+
+        _isExporting = true;
+        try
+        {
+            var json = TemplateService.ExportToJson(templates);
+            var fileName = $"ffmpegwebui-templates-{DateTime.Now:yyyyMMdd-HHmmss}.json";
+            var saved = await JS.InvokeAsync<bool>("ffui.saveTextFile", fileName, json, "application/json");
+
+            if (saved)
+            {
+                var scopeText = filtered ? "当前筛选结果" : "全部模板";
+                Toast.Success($"已导出{scopeText} {templates.Count} 个到 {fileName}");
+            }
+            else
+            {
+                Toast.Error("导出失败：浏览器没有触发下载，请检查浏览器的下载权限或拦截设置。");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"导出失败：{ex.Message}");
+        }
+        finally
+        {
+            _isExporting = false;
+        }
     }
+
+    private void OpenImport()
+    {
+        _importJson = string.Empty;
+        _importAsSystem = false;
+        _importOpen = true;
+    }
+
+    private void CloseImport()
+    {
+        _importOpen = false;
+    }
+
+    private void OnImportOpenChanged(bool open)
+    {
+        _importOpen = open;
+    }
+
+    private async Task ImportAsync()
+    {
+        if (_isImporting) return;
+
+        var json = (_importJson ?? string.Empty).Trim();
+        if (json.Length == 0)
+        {
+            Toast.Warning("请先粘贴模板 JSON 内容。");
+            return;
+        }
+
+        _isImporting = true;
+        try
+        {
+            var imported = await TemplateService.ImportFromJsonAsync(json, _importAsSystem);
+            if (imported > 0)
+            {
+                Toast.Success(_importAsSystem
+                    ? $"已导入 {imported} 个模板（作为系统预设）"
+                    : $"已导入 {imported} 个模板");
+                _importOpen = false;
+                _importJson = string.Empty;
+                await LoadTemplatesAsync();
+            }
+            else
+            {
+                Toast.Warning("没有导入任何模板：JSON 里没有含 name 与 commandArgs 的模板条目。");
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            Toast.Error($"导入失败：{ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"导入失败：{ex.Message}");
+        }
+        finally
+        {
+            _isImporting = false;
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 工具
+    // ────────────────────────────────────────────────────────────────
+
+    private static CommandTemplate CloneTemplate(CommandTemplate source) => new()
+    {
+        Id = source.Id,
+        Name = source.Name,
+        Description = source.Description,
+        CommandArgs = source.CommandArgs,
+        Type = source.Type,
+        Category = source.Category,
+        SupportedInputFormats = [.. source.SupportedInputFormats],
+        OutputExtension = source.OutputExtension,
+        TargetCodec = source.TargetCodec,
+        RequiresHardwareAcceleration = source.RequiresHardwareAcceleration,
+        HardwareMode = source.HardwareMode,
+        RequiredEncoder = source.RequiredEncoder,
+        Parameters = source.Parameters.Select(p => new TemplateParameter
+        {
+            Name = p.Name,
+            Label = p.Label,
+            Description = p.Description,
+            Kind = p.Kind,
+            DefaultValue = p.DefaultValue,
+            Options = p.Options.Select(o => new TemplateParameterOption(o.Value, o.Label, o.Description)).ToList(),
+            Min = p.Min,
+            Max = p.Max,
+            TrueValue = p.TrueValue,
+            FalseValue = p.FalseValue
+        }).ToList(),
+        Tags = [.. source.Tags],
+        IsRecommended = source.IsRecommended,
+        PresetVersion = source.PresetVersion,
+        CreatedAt = source.CreatedAt,
+        UpdatedAt = source.UpdatedAt,
+        SortOrder = source.SortOrder
+    };
 }
-
-<style>
-    .templates-container {
-        max-width: 1400px;
-        margin: 0 auto;
-    }
-
-    .page-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1.5rem;
-    }
-
-    .page-header h1 {
-        margin: 0;
-    }
-
-    .btn-create {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.75rem 1.5rem;
-        background: #28a745;
-        color: white;
-        border: none;
-        border-radius: 6px;
-        font-size: 0.95rem;
-        cursor: pointer;
-        transition: background 0.2s;
-    }
-
-    .btn-create:hover {
-        background: #218838;
-    }
-
-    .filter-bar {
-        background: var(--light-bg, #f8f9fa);
-        padding: 1rem;
-        border-radius: 8px;
-        margin-bottom: 1.5rem;
-        border: 1px solid var(--border-color, #ddd);
-    }
-
-    .filter-bar input[type="text"] {
-        width: 100%;
-        padding: 0.6rem;
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 4px;
-        margin-bottom: 0.75rem;
-        font-size: 0.95rem;
-        background: var(--input-bg, white);
-        color: var(--text-primary, #333);
-    }
-
-    .category-filter {
-        display: flex;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-        margin-bottom: 0.75rem;
-    }
-
-    .filter-btn {
-        padding: 0.4rem 0.8rem;
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 4px;
-        background: var(--card-bg, white);
-        color: var(--text-primary, #333);
-        cursor: pointer;
-        font-size: 0.85rem;
-        transition: background 0.2s, color 0.2s;
-    }
-
-    .filter-btn:hover {
-        background: var(--light-bg, #e9ecef);
-    }
-
-    .filter-btn.active {
-        background: #007bff;
-        color: white;
-        border-color: #007bff;
-    }
-
-    .type-filter {
-        display: flex;
-        gap: 1rem;
-    }
-
-    .type-filter label {
-        display: flex;
-        align-items: center;
-        gap: 0.25rem;
-        cursor: pointer;
-        font-size: 0.9rem;
-    }
-
-    .loading,
-    .empty-state {
-        text-align: center;
-        padding: 3rem;
-        color: #666;
-    }
-
-    .view-toggle {
-        display: flex;
-        gap: 0.25rem;
-        margin-left: auto;
-    }
-
-    .view-btn {
-        padding: 0.4rem 0.6rem;
-        border: 1px solid var(--border-color, #ddd);
-        background: var(--card-bg, white);
-        color: var(--text-secondary, #666);
-        cursor: pointer;
-        font-size: 1rem;
-        line-height: 1;
-        transition: all 0.2s;
-    }
-
-    .view-btn:first-child {
-        border-radius: 4px 0 0 4px;
-    }
-
-    .view-btn:last-child {
-        border-radius: 0 4px 4px 0;
-        border-left: none;
-    }
-
-    .view-btn:hover {
-        background: var(--light-bg, #e9ecef);
-    }
-
-    .view-btn.active {
-        background: #007bff;
-        color: white;
-        border-color: #007bff;
-    }
-
-    .templates-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-        gap: 1rem;
-    }
-
-    .templates-list {
-        display: flex;
-        flex-direction: column;
-        gap: 0.75rem;
-    }
-
-    .message {
-        position: fixed;
-        bottom: 2rem;
-        right: 2rem;
-        padding: 1rem 1.5rem;
-        border-radius: 8px;
-        z-index: 100;
-        animation: slideIn 0.3s;
-    }
-
-    .message.success {
-        background: #d4edda;
-        color: #155724;
-    }
-
-    .message.error {
-        background: #f8d7da;
-        color: #721c24;
-    }
-
-    .message.info {
-        background: #cce5ff;
-        color: #004085;
-    }
-
-    @@keyframes slideIn {
-        from {
-            transform: translateX(100%);
-            opacity: 0;
-        }
-        to {
-            transform: translateX(0);
-            opacity: 1;
-        }
-    }
-
-    .confirm-dialog {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 1001;
-    }
-
-    .confirm-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.5);
-    }
-
-    .confirm-panel {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: var(--card-bg, white);
-        padding: 1.5rem;
-        border-radius: 8px;
-        min-width: 300px;
-        color: var(--text-primary, #333);
-        border: 1px solid var(--border-color, #ddd);
-    }
-
-    .confirm-panel h3 {
-        margin: 0 0 1rem 0;
-        color: var(--text-primary, #333);
-    }
-
-    .confirm-panel p {
-        margin: 0 0 1.5rem 0;
-        color: var(--text-secondary, #666);
-    }
-
-    .confirm-actions {
-        display: flex;
-        gap: 0.75rem;
-        justify-content: flex-end;
-    }
-
-    .btn-secondary,
-    .btn-danger {
-        padding: 0.5rem 1rem;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 0.9rem;
-    }
-
-    .btn-secondary {
-        background: var(--light-bg, #f8f9fa);
-        border: 1px solid var(--border-color, #ddd);
-        color: var(--text-primary, #333);
-    }
-
-    .btn-secondary:hover {
-        background: var(--card-bg, #e9ecef);
-    }
-
-    .btn-danger {
-        background: #dc3545;
-        color: white;
-        border: none;
-    }
-
-    .btn-danger:hover {
-        background: #c82333;
-    }
-</style>

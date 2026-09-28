@@ -1,392 +1,1603 @@
 @page "/settings"
+@using System.Diagnostics
 @using FFmpegWebUI.Models
 @using FFmpegWebUI.Services
 @using FFmpegWebUI.Components.Shared
+@implements IDisposable
 @inject ISettingsService SettingsService
-@inject IFFmpegService FFmpegService
-@inject NavigationManager Navigation
+@inject IAppStatusService AppStatusService
+@inject IHardwareDetectionService HardwareDetection
+@inject IFileService FileService
+@inject ITaskService TaskService
+@inject IToastService Toast
+@inject IJSRuntime JS
 @rendermode InteractiveServer
 
 <PageTitle>设置 - FFmpeg Web UI</PageTitle>
 
-<div class="settings-container">
+<div class="ffui-container settings-page">
     <h1>⚙️ 设置</h1>
+    <p class="page-intro">
+        所有设置都保存在本机数据目录的数据库里，不会上传；修改后需要点击页面底部的「保存设置」才会写入。
+    </p>
 
-    @if (_isLoading)
+    @if (!_isReady)
     {
-        <div class="loading">加载中...</div>
+        <div class="ffui-loading-row"><span class="spinner" aria-hidden="true"></span> 正在读取设置…</div>
     }
     else
     {
-        <div class="settings-sections">
-            <section class="settings-section">
-                <h2>📍 FFmpeg 路径</h2>
-                <FileSelector Label="FFmpeg 可执行文件路径"
-                              @bind-Value="_settings.FFmpegPath"
-                              Placeholder="留空则使用系统 PATH 中的 ffmpeg"
-                              ValidateExists="false"
-                              ShowFileInfo="true" />
-                <div class="form-group inline-action">
-                    <button class="btn-test" @onclick="TestFFmpegPath">🔍 测试 FFmpeg</button>
-                    @if (_ffmpegTestResult != null)
-                    {
-                        <span class="test-result @(_ffmpegTestResult.Value ? "success" : "error")">
-                            @(_ffmpegTestResult.Value ? "✓ FFmpeg 可用" : "✗ FFmpeg 不可用")
-                        </span>
-                    }
-                </div>
-                <span class="help-text">
-                    例如：C:\ffmpeg\bin\ffmpeg.exe 或 /usr/local/bin/ffmpeg
-                </span>
-
-                <FileSelector Label="ffprobe 可执行文件路径"
-                              @bind-Value="_settings.FFprobePath"
-                              Placeholder="留空则使用系统 PATH 中的 ffprobe"
-                              ValidateExists="false"
-                              ShowFileInfo="true" />
-            </section>
-
-            <section class="settings-section">
-                <h2>📁 输出设置</h2>
-                <FileSelector Label="默认输出目录"
-                              @bind-Value="_settings.DefaultOutputDirectory"
-                              Placeholder="选择默认输出目录"
-                              IsDirectory="true"
-                              ValidateExists="false" />
-
-                <div class="form-group">
-                    <label>输出文件命名规则</label>
-                    <select @bind="_settings.OutputNaming">
-                        <option value="@OutputNamingRule.Original">保持原名</option>
-                        <option value="@OutputNamingRule.Suffix">添加后缀</option>
-                    </select>
-                </div>
-
-                @if (_settings.OutputNaming == OutputNamingRule.Suffix)
+        @* ── 1 · 环境信息（只读诊断）───────────────────────────────────── *@
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title panel-head">
+                🩺 环境信息
+                @if (_isChecking)
                 {
-                    <div class="form-group">
-                        <label>输出文件后缀</label>
-                        <input type="text" @bind="_settings.OutputSuffix"
-                               placeholder="_converted" />
-                        <span class="help-text">
-                            示例：原文件 video.mp4 → video@(_settings.OutputSuffix).mp4
+                    <span class="spinner" aria-hidden="true"></span>
+                }
+            </h2>
+
+            <div class="toolbar">
+                <button type="button" class="ffui-btn" @onclick="RecheckAsync" disabled="@_isChecking">
+                    @if (_isChecking)
+                    {
+                        <span class="spinner" aria-hidden="true"></span>
+                    }
+                    @(_isChecking ? "检测中…" : "重新检测")
+                </button>
+                <span class="field-help">重新读取 FFmpeg、ffprobe、硬件解码能力与数据目录状态（可能需要几秒）。</span>
+            </div>
+
+            @if (_status is null)
+            {
+                <div class="ffui-loading-row"><span class="spinner" aria-hidden="true"></span> 正在检测环境…</div>
+            }
+            else
+            {
+                <div class="kv-grid">
+                    <span class="kv-key">应用版本</span>
+                    <span class="kv-value">v@(_status.AppVersion)</span>
+
+                    <span class="kv-key">平台</span>
+                    <span class="kv-value">@_status.Platform</span>
+
+                    <span class="kv-key">.NET 版本</span>
+                    <span class="kv-value">@_status.Runtime</span>
+
+                    <span class="kv-key">数据目录</span>
+                    <span class="kv-value">
+                        <span class="code-path">@_status.DataDirectory</span>
+                        @if (_dataDirectoryWritable)
+                        {
+                            <span class="ffui-badge ffui-badge-success">可写</span>
+                        }
+                        else
+                        {
+                            <span class="ffui-badge ffui-badge-danger">不可写</span>
+                        }
+                        @if (!_dataDirectoryWritable)
+                        {
+                            <span class="muted">设置与任务历史可能无法保存，请检查目录权限（可用环境变量 FFMPEGWEBUI_DATA_DIR 换一个位置）。</span>
+                        }
+                    </span>
+
+                    <span class="kv-key">FFmpeg</span>
+                    <span class="kv-value">
+                        @if (_status.FFmpegAvailable)
+                        {
+                            <span class="ffui-badge ffui-badge-success">可用</span>
+                            <span>@_status.FFmpegVersion</span>
+                        }
+                        else
+                        {
+                            <span class="ffui-badge ffui-badge-danger">未找到</span>
+                            <span class="muted">转换功能不可用，请先安装 FFmpeg（见下方指引）。</span>
+                        }
+                    </span>
+
+                    <span class="kv-key">FFmpeg 路径</span>
+                    <span class="kv-value">
+                        <span class="code-path">@ResolvedFFmpegPath</span>
+                        <span class="ffui-badge @(_status.AutoDetected ? "" : "ffui-badge-info")">
+                            @(_status.AutoDetected ? "自动探测" : "来自设置")
+                        </span>
+                    </span>
+
+                    <span class="kv-key">ffprobe 路径</span>
+                    <span class="kv-value">
+                        <span class="code-path">@ResolvedFFprobePath</span>
+                        @if (!_status.FFmpegAvailable)
+                        {
+                            <span class="muted">FFmpeg 不可用时无法确认是否真的存在。</span>
+                        }
+                    </span>
+
+                    <span class="kv-key">硬件解码方式</span>
+                    <span class="kv-value">
+                        @if (_status.Hwaccels.Count == 0)
+                        {
+                            <span class="muted">当前 FFmpeg 未报告可用的硬件解码方式。</span>
+                        }
+                        else
+                        {
+                            @foreach (var hwaccel in _status.Hwaccels)
+                            {
+                                <span class="ffui-badge ffui-badge-info" @key="hwaccel">@hwaccel</span>
+                            }
+                        }
+                    </span>
+                </div>
+
+                @if (_status.Notices.Count == 0)
+                {
+                    <div class="notices">
+                        <div class="ffui-alert ffui-alert-success" role="status">
+                            <span aria-hidden="true">✅</span>
+                            <span>一切正常：FFmpeg 可用，未发现需要注意的问题。</span>
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <div class="notices">
+                        @for (var i = 0; i < _status.Notices.Count; i++)
+                        {
+                            <div class="ffui-alert @(_status.FFmpegAvailable ? "ffui-alert-warning" : "ffui-alert-danger")"
+                                 role="status" @key="i">
+                                <span aria-hidden="true">@(_status.FFmpegAvailable ? "⚠️" : "⛔")</span>
+                                <span>@_status.Notices[i]</span>
+                            </div>
+                        }
+                    </div>
+                }
+
+                @if (!_status.FFmpegAvailable)
+                {
+                    <div class="ffui-alert ffui-alert-warning install-guide" role="status">
+                        <div>
+                            <strong>安装 FFmpeg（@_status.Platform）</strong>
+                            @if (IsWindows)
+                            {
+                                <ol>
+                                    <li>下载 FFmpeg 完整构建包（如 gyan.dev 或 BtbN 的 release），解压到 <span class="code-path">C:\ffmpeg</span>。</li>
+                                    <li>把 <span class="code-path">C:\ffmpeg\bin</span> 加入系统 PATH，或直接在下面的「FFmpeg 可执行文件」里填写 <span class="code-path">ffmpeg.exe</span> 的完整路径。</li>
+                                    <li>也可以用包管理器：<span class="code-path">winget install Gyan.FFmpeg</span> / <span class="code-path">choco install ffmpeg</span> / <span class="code-path">scoop install ffmpeg</span>。</li>
+                                    <li>改完 PATH 需要重启本应用，再点上面的「重新检测」。</li>
+                                </ol>
+                            }
+                            else if (IsMacOS)
+                            {
+                                <ol>
+                                    <li>推荐 Homebrew：<span class="code-path">brew install ffmpeg</span>（会自动带上 ffprobe）。</li>
+                                    <li>Apple 芯片装到 <span class="code-path">/opt/homebrew/bin</span>，Intel 机器装到 <span class="code-path">/usr/local/bin</span>。</li>
+                                    <li>装完点上面的「重新检测」；若仍未找到，可在下面直接指定完整路径。</li>
+                                </ol>
+                            }
+                            else
+                            {
+                                <ol>
+                                    <li>Debian/Ubuntu：<span class="code-path">sudo apt install ffmpeg</span></li>
+                                    <li>Fedora/RHEL：<span class="code-path">sudo dnf install ffmpeg</span></li>
+                                    <li>Arch：<span class="code-path">sudo pacman -S ffmpeg</span></li>
+                                    <li>装完点上面的「重新检测」；若用 Docker，请确认容器镜像里也装了 FFmpeg。</li>
+                                </ol>
+                            }
+
+                            <div class="install-paths">
+                                <span>会按顺序在这些位置查找：</span>
+                                <ul>
+                                    <li>设置里填写的路径（优先）</li>
+                                    <li>应用所在目录下的内置副本：<span class="code-path">ffmpeg@(ExeSuffix)</span>、<span class="code-path">ffmpeg/ffmpeg@(ExeSuffix)</span>、<span class="code-path">tools/ffmpeg/ffmpeg@(ExeSuffix)</span></li>
+                                    @if (IsWindows)
+                                    {
+                                        <li>系统 PATH</li>
+                                        <li><span class="code-path">C:\ffmpeg\bin\ffmpeg.exe</span>、<span class="code-path">C:\ProgramData\chocolatey\bin\ffmpeg.exe</span></li>
+                                        <li><span class="code-path">%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe</span>、<span class="code-path">%USERPROFILE%\scoop\shims\ffmpeg.exe</span></li>
+                                    }
+                                    else if (IsMacOS)
+                                    {
+                                        <li>系统 PATH</li>
+                                        <li><span class="code-path">/opt/homebrew/bin/ffmpeg</span>（Apple 芯片 Homebrew）</li>
+                                        <li><span class="code-path">/usr/local/bin/ffmpeg</span>、<span class="code-path">/opt/local/bin/ffmpeg</span>（Intel Homebrew / MacPorts）</li>
+                                    }
+                                    else
+                                    {
+                                        <li>系统 PATH</li>
+                                        <li><span class="code-path">/usr/bin/ffmpeg</span>、<span class="code-path">/usr/local/bin/ffmpeg</span></li>
+                                        <li><span class="code-path">/usr/lib/jellyfin-ffmpeg/ffmpeg</span>（对 QSV/VAAPI 支持更完整）</li>
+                                        <li><span class="code-path">/snap/bin/ffmpeg</span>、<span class="code-path">/var/lib/flatpak/exports/bin/ffmpeg</span></li>
+                                    }
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                }
+            }
+        </section>
+
+        @* ── 2 · 硬件加速能力 ──────────────────────────────────────────── *@
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title panel-head">
+                🚀 硬件加速能力
+                @if (_report is not null && !_isScanning)
+                {
+                    <span class="ffui-badge @(_report.HasHardwareAcceleration ? "ffui-badge-success" : "ffui-badge-warning")">
+                        @_report.AvailableHardwareEncoders.Count 个可用硬件编码器
+                    </span>
+                }
+            </h2>
+
+            <div class="toolbar">
+                <button type="button" class="ffui-btn ffui-btn-primary" @onclick="ScanHardwareAsync" disabled="@_isScanning">
+                    @if (_isScanning)
+                    {
+                        <span class="spinner" aria-hidden="true"></span>
+                    }
+                    @(_isScanning ? "检测中…" : "重新检测硬件编码器")
+                </button>
+                @if (_isScanning)
+                {
+                    <span class="muted">
+                        已用时 @ElapsedSeconds 秒，请勿刷新页面…
+                    </span>
+                }
+                else if (_report is not null)
+                {
+                    <span class="muted">上次检测：@FormatLocalTime(_report.DetectedAt)</span>
+                }
+            </div>
+            <span class="field-help">
+                检测会逐个真实试跑本机的硬件编码器（每个约 1~3 秒），通常需要几秒到十几秒，期间可以继续操作其它设置。
+            </span>
+
+            @if (_report is null)
+            {
+                <div class="ffui-loading-row"><span class="spinner" aria-hidden="true"></span> 正在读取硬件编码器列表…</div>
+            }
+            else
+            {
+                @if (!string.IsNullOrEmpty(_report.Summary))
+                {
+                    <div class="ffui-alert ffui-alert-info report-summary" role="status">
+                        <span aria-hidden="true">ℹ️</span>
+                        <span>
+                            @_report.Summary
+                            <br />
+                            <span class="muted">
+                                检测时间 @FormatLocalTime(_report.DetectedAt)
+                                @if (!string.IsNullOrEmpty(_report.FFmpegVersion))
+                                {
+                                    @:· FFmpeg @_report.FFmpegVersion
+                                }
+                            </span>
                         </span>
                     </div>
                 }
 
-                <div class="form-group">
-                    <label>文件已存在时的处理方式</label>
-                    <select @bind="_settings.FileExistsAction">
-                        <option value="@FileExistsAction.Ask">询问用户</option>
-                        <option value="@FileExistsAction.Overwrite">覆盖</option>
-                        <option value="@FileExistsAction.Skip">跳过</option>
-                        <option value="@FileExistsAction.Rename">重命名</option>
+                <div class="field">
+                    <label for="preferred-encoder">首选硬件编码器</label>
+                    <select id="preferred-encoder"
+                            @bind="_form.PreferredHardwareEncoder"
+                            disabled="@(!HasAvailableHardware)">
+                        <option value="" @key="AutoEncoderOptionKey">自动（按编码格式选择，推荐）</option>
+                        @foreach (var encoder in AvailableEncoders)
+                        {
+                            <option value="@encoder.Name" @key="encoder.Name">
+                                @encoder.DisplayName（@encoder.Name）
+                            </option>
+                        }
+                        @if (PreferredEncoderUnavailable)
+                        {
+                            <option value="@_form.PreferredHardwareEncoder" @key="SavedEncoderOptionKey">
+                                @_form.PreferredHardwareEncoder（当前不可用）
+                            </option>
+                        }
                     </select>
-                </div>
-            </section>
+                    <span class="field-help">
+                        @if (HasAvailableHardware)
+                        {
+                            <span>只影响「优先使用硬件编码」的模板；留空时由应用按 h264/hevc/av1 等编码格式自动挑选。</span>
+                        }
+                        else
+                        {
+                            <span>本机没有可用的硬件编码器（或检测尚未完成），因此暂不能指定。转换会使用 CPU 软件编码。</span>
+                        }
+                    </span>
 
-            <section class="settings-section">
-                <h2>🚀 性能设置</h2>
-                <div class="form-group checkbox">
-                    <label>
-                        <input type="checkbox" @bind="_settings.PreferHardwareAcceleration" />
-                        优先使用硬件加速
-                    </label>
-                    <span class="help-text">
-                        启用后将自动选择可用的硬件编码器（NVENC、QSV、AMF）
+                    @if (PreferredEncoderUnavailable)
+                    {
+                        <span class="field-error" role="alert">
+                            ⚠ 已保存的首选编码器「@_form.PreferredHardwareEncoder」当前不可用（可能驱动未安装或 FFmpeg 未编译该编码器）。
+                        </span>
+                        <button type="button" class="ffui-btn ffui-btn-sm" @onclick="ClearPreferredEncoder">改为「自动」</button>
+                    }
+                </div>
+
+            }
+
+            @* 下面三项是设置本身，与硬件检测是否完成无关，因此始终显示。 *@
+            <h3 class="ffui-section-title">硬件加速开关</h3>
+            <div class="check-field">
+                <input id="prefer-hardware" type="checkbox" @bind="_form.PreferHardwareAcceleration" />
+                <div>
+                    <label for="prefer-hardware">优先使用硬件编码（GPU 编码）</label>
+                    <span class="field-help">
+                        模板没有指定编码器时，自动选择本机可用的硬件编码器（NVENC / QSV / AMF / VideoToolbox / VA-API 等），速度更快、CPU 占用更低。
                     </span>
                 </div>
-            </section>
+            </div>
 
-            <section class="settings-section">
-                <h2>🧹 数据管理</h2>
-                <div class="form-group">
-                    <label>任务历史保留天数</label>
-                    <input type="number" @bind="_settings.TaskHistoryRetentionDays" min="0" max="365" />
-                    <span class="help-text">
-                        设置为 0 表示不自动清理历史记录
+            <div class="check-field">
+                <input id="prefer-hwdecode" type="checkbox" @bind="_form.PreferHardwareDecoding" />
+                <div>
+                    <label for="prefer-hwdecode">优先使用硬件解码（输入侧）</label>
+                    <span class="field-help">
+                        硬件解码可以减轻 CPU 负担，但个别老驱动可能不稳定；如果转换出现花屏、卡住或崩溃，请关闭此项。
                     </span>
                 </div>
-            </section>
+            </div>
 
-            <section class="settings-section">
-                <h2>🎨 界面设置</h2>
-                <div class="form-group">
-                    <label>主题</label>
-                    <select @bind="_settings.Theme">
-                        <option value="System">跟随系统</option>
-                        <option value="Light">浅色</option>
-                        <option value="Dark">深色</option>
-                    </select>
+            <div class="check-field">
+                <input id="auto-fallback" type="checkbox" @bind="_form.AutoFallbackToSoftware" />
+                <div>
+                    <label for="auto-fallback">硬件编码失败时自动改用软件编码重试</label>
+                    <span class="field-help">
+                        硬件编码失败时自动改用软件编码重试，避免任务直接失败。只有在 FFmpeg 还没有写出有效数据时才会回退，因此不会产出损坏的文件。
+                    </span>
                 </div>
-            </section>
-        </div>
+            </div>
 
-        <div class="action-section">
-            <button class="btn-primary" @onclick="SaveSettings" disabled="@_isSaving">
-                @(_isSaving ? "保存中..." : "💾 保存设置")
-            </button>
-            <button class="btn-secondary" @onclick="ResetSettings">
-                🔄 恢复默认
-            </button>
-        </div>
 
-        @if (!string.IsNullOrEmpty(_message))
+        @if (_report is not null)
         {
-            <div class="message @_messageClass">@_message</div>
+            @if (!HasAvailableHardware && _report.Encoders.Count > 0)
+            {
+                <div class="ffui-alert ffui-alert-warning" role="status">
+                    <span aria-hidden="true">⚠️</span>
+                    <span>未检测到可用的硬件编码器，转换会使用 CPU 软件编码（较慢但兼容性最好）。</span>
+                </div>
+            }
+
+            <div class="encoder-groups">
+                @foreach (var group in EncoderGroups)
+                {
+                    <div class="encoder-group" @key="group.Key">
+                        <h3 class="encoder-group-title">
+                            @group.Label
+                            <span class="ffui-badge @(group.AvailableCount > 0 ? "ffui-badge-success" : "")">
+                                @group.AvailableCount / @group.Encoders.Count 可用
+                            </span>
+                        </h3>
+                        <div class="encoder-grid">
+                            @foreach (var encoder in group.Encoders)
+                            {
+                                <EncoderCard Encoder="encoder" @key="encoder.Name" />
+                            }
+                        </div>
+                    </div>
+                }
+            </div>
         }
+        </section>
+
+        @* ── 3 · 路径设置 ─────────────────────────────────────────────── *@
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">📁 FFmpeg 路径</h2>
+
+            <FileSelector Label="FFmpeg 可执行文件"
+                          @bind-Value="_form.FFmpegPath"
+                          Placeholder="留空则自动探测（系统 PATH / 常见安装位置 / 内置副本）"
+                          ValidateExists="false"
+                          ShowFileInfo="true" />
+
+            <div class="resolved-row">
+                <span class="resolved-label">当前实际使用：</span>
+                <span class="code-path">@ResolvedFFmpegPath</span>
+                <span class="muted">（保存或「重新检测」后更新）</span>
+            </div>
+
+            <div class="toolbar">
+                <button type="button" class="ffui-btn" @onclick="TestFFmpegAsync" disabled="@_isTestingFFmpeg">
+                    @if (_isTestingFFmpeg)
+                    {
+                        <span class="spinner" aria-hidden="true"></span>
+                    }
+                    @(_isTestingFFmpeg ? "测试中…" : "测试 FFmpeg")
+                </button>
+                @if (FFmpegTestShown is { } ffmpegTest)
+                {
+                    <span class="test-result @(ffmpegTest.Success ? "ok" : "bad")" role="status">@ffmpegTest.Message</span>
+                }
+            </div>
+            <span class="field-help">
+                示例：<span class="code-path">C:\ffmpeg\bin\ffmpeg.exe</span> 或 <span class="code-path">/opt/homebrew/bin/ffmpeg</span>。
+                留空时会测试系统 PATH 中的 ffmpeg。
+            </span>
+
+            <div class="field-divider"></div>
+
+            <FileSelector Label="ffprobe 可执行文件"
+                          @bind-Value="_form.FFprobePath"
+                          Placeholder="留空则自动探测（通常与 ffmpeg 同目录）"
+                          ValidateExists="false"
+                          ShowFileInfo="true" />
+
+            <div class="resolved-row">
+                <span class="resolved-label">当前实际使用：</span>
+                <span class="code-path">@ResolvedFFprobePath</span>
+                <span class="muted">（保存或「重新检测」后更新）</span>
+            </div>
+
+            <div class="toolbar">
+                <button type="button" class="ffui-btn" @onclick="TestFFprobeAsync" disabled="@_isTestingFFprobe">
+                    @if (_isTestingFFprobe)
+                    {
+                        <span class="spinner" aria-hidden="true"></span>
+                    }
+                    @(_isTestingFFprobe ? "检查中…" : "测试 ffprobe")
+                </button>
+                @if (FFprobeTestShown is { } ffprobeTest)
+                {
+                    <span class="test-result @(ffprobeTest.Success ? "ok" : "bad")" role="status">@ffprobeTest.Message</span>
+                }
+            </div>
+            <span class="field-help">
+                读取输入文件的时长、分辨率等媒体信息需要 ffprobe（用 ffmpeg 本身无法可靠地拿到）。
+                这里只能检查「文件是否存在且可读 / 是否在 PATH 中」，不会真的执行 ffprobe —— 如需确认真实可用，请用上面的「测试 FFmpeg」确认版本信息能正常解析。
+            </span>
+        </section>
+
+        @* ── 4 · 输出设置 ─────────────────────────────────────────────── *@
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">📂 输出设置</h2>
+
+            <FileSelector Label="默认输出目录"
+                          @bind-Value="_form.DefaultOutputDirectory"
+                          Placeholder="例如 /Users/you/Videos 或 D:\Output"
+                          IsDirectory="true"
+                          ValidateExists="false" />
+            <span class="field-help">
+                新建转换/批量任务时预填的输出目录；留空时转换页面会要求你手动选择。
+                保存时会检查这个目录能否创建并写入，不可写则拒绝保存。
+            </span>
+            @if (DirectoryWritabilityError is not null)
+            {
+                <span class="field-error" role="alert">✗ @DirectoryWritabilityError</span>
+            }
+
+            <div class="field">
+                <label for="output-naming">输出文件命名规则</label>
+                <select id="output-naming" @bind="_form.OutputNaming">
+                    <option value="@OutputNamingRule.Original">保持原名</option>
+                    <option value="@OutputNamingRule.Suffix">添加后缀</option>
+                </select>
+                <span class="field-help">示例：@SuffixPreview</span>
+            </div>
+
+            @if (_form.OutputNaming == OutputNamingRule.Suffix)
+            {
+                <div class="field">
+                    <label for="output-suffix">输出文件后缀</label>
+                    <input id="output-suffix" type="text" @bind="_form.OutputSuffix" @bind:event="oninput"
+                           placeholder="_converted" />
+                    <span class="field-help">
+                        常用值：<span class="code-path">_converted</span>、<span class="code-path">_out</span>、<span class="code-path">-1080p</span>。
+                        预览：@SuffixPreview
+                    </span>
+                    @if (string.IsNullOrWhiteSpace(_form.OutputSuffix))
+                    {
+                        <span class="field-error" role="alert">✗ 选择「添加后缀」时后缀不能为空，否则输出文件会与原文件同名。</span>
+                    }
+                    else if (SuffixInvalidChars is not null)
+                    {
+                        <span class="field-error" role="alert">
+                            ✗ 后缀包含文件名不允许的字符：@SuffixInvalidChars（不能包含 / \ : * ? &quot; &lt; &gt; | 等）
+                        </span>
+                    }
+                </div>
+            }
+
+            <div class="field">
+                <label for="exists-action">文件已存在时的处理方式</label>
+                <select id="exists-action" @bind="_form.ExistingFileAction">
+                    <option value="@FileExistsAction.Ask">询问用户</option>
+                    <option value="@FileExistsAction.Overwrite">覆盖</option>
+                    <option value="@FileExistsAction.Skip">跳过</option>
+                    <option value="@FileExistsAction.Rename">重命名</option>
+                </select>
+                <span class="field-help">@FileExistsActionHelp</span>
+            </div>
+        </section>
+
+        @* ── 5 · 性能与数据 ───────────────────────────────────────────── *@
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">⚡ 性能与数据</h2>
+
+            <div class="field">
+                <label for="max-concurrent">同时执行的转换任务数</label>
+                <select id="max-concurrent" @bind="_form.MaxConcurrentTasks">
+                    @for (var i = 1; i <= 8; i++)
+                    {
+                        <option value="@i" @key="i">@i</option>
+                    }
+                </select>
+                <span class="field-help">
+                    默认 1（串行）。大于 1 会同时跑多个 FFmpeg 进程：显卡/CPU 的编码器通常无法真正并行，
+                    多个任务容易互相抢占资源，反而每个都变慢；只有在批量处理大量小文件时可能略快。
+                </span>
+            </div>
+
+            <div class="field">
+                <label for="max-log-lines">单个任务保留的日志行数</label>
+                <input id="max-log-lines" type="number" min="50" max="20000" step="50" @bind="_form.MaxLogLines" />
+                <span class="field-help">允许范围 50 ~ 20000；超出后丢弃最早的行，数值越大占用内存越多。</span>
+            </div>
+
+            <div class="field">
+                <label for="history-retention">任务历史保留天数</label>
+                <input id="history-retention" type="number" min="0" max="3650" @bind="_form.TaskHistoryRetentionDays" />
+                <span class="field-help">应用每次启动时按这个天数清理一次历史记录（0 表示启动时不自动清理）。</span>
+            </div>
+
+            <div class="toolbar">
+                <button type="button" class="ffui-btn" @onclick="CleanupHistoryAsync"
+                        disabled="@(_isCleaningHistory || _form.TaskHistoryRetentionDays <= 0)">
+                    @if (_isCleaningHistory)
+                    {
+                        <span class="spinner" aria-hidden="true"></span>
+                    }
+                    @(_isCleaningHistory ? "清理中…" : "立即清理历史")
+                </button>
+                <button type="button" class="ffui-btn ffui-btn-danger" @onclick="OpenClearConfirm"
+                        disabled="@_isClearingHistory">
+                    清空全部历史
+                </button>
+                @if (_form.TaskHistoryRetentionDays <= 0)
+                {
+                    <span class="muted">保留天数填的是 0（不按天数清理），要清空请用「清空全部历史」。</span>
+                }
+            </div>
+            <span class="field-help">「立即清理历史」按上面填写的天数执行一次（使用当前输入值，不需要先保存设置）。</span>
+
+            @if (!string.IsNullOrEmpty(_historyMessage))
+            {
+                <div class="ffui-alert ffui-alert-info history-message" role="status">@_historyMessage</div>
+            }
+
+            <details class="advanced">
+                <summary>全局 FFmpeg 参数（高级）</summary>
+                <div class="field">
+                    <label for="global-args">附加到每条 FFmpeg 命令的参数</label>
+                    <input id="global-args" type="text" @bind="_form.GlobalFFmpegArguments" placeholder="-threads 4" />
+                    <span class="field-help">留空表示不追加。参数会被插入到输出文件之前，对每一次转换都生效。</span>
+                </div>
+                <div class="ffui-alert ffui-alert-warning" role="status">
+                    <span aria-hidden="true">⚠️</span>
+                    <span>
+                        这些参数会附加到每一条命令，写错会让所有转换都失败；请先确认语法。
+                        不要在这里写 <span class="code-path">-y</span> / <span class="code-path">-n</span>，覆盖策略由「文件已存在时的处理方式」自动处理。
+                    </span>
+                </div>
+            </details>
+        </section>
+
+        @* ── 6 · 界面与通知 ───────────────────────────────────────────── *@
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">🎨 界面与通知</h2>
+
+            <div class="field">
+                <label for="theme-select">主题</label>
+                <select id="theme-select" @bind="_form.Theme" @bind:after="OnThemeChangedAsync">
+                    <option value="System">跟随系统</option>
+                    <option value="Light">浅色</option>
+                    <option value="Dark">深色</option>
+                </select>
+                <span class="field-help">切换后立即在本页生效；点击「保存设置」后才会在下次打开时保持（不需要刷新页面）。</span>
+            </div>
+
+            <div class="check-field">
+                <input id="notify-completion" type="checkbox" @bind="_form.NotifyOnCompletion" @bind:after="OnNotifyChangedAsync" />
+                <div>
+                    <label for="notify-completion">任务完成后发送浏览器通知</label>
+                    <span class="field-help">
+                        勾选时浏览器会弹出权限请求；如果权限被拒绝或在设置里被关闭，通知不会出现（可在浏览器地址栏的站点设置里重新允许）。
+                    </span>
+                </div>
+            </div>
+
+            <div class="field">
+                <label for="listen-port">监听端口</label>
+                <input id="listen-port" type="number" min="0" max="65535" @bind="_form.ListenPort" />
+                <span class="field-help">
+                    修改后需要<b>重启应用</b>才会生效；0 表示自动挑选一个空闲端口。
+                    实际端口的优先级为：命令行 <span class="code-path">--port</span> &gt;
+                    环境变量 <span class="code-path">FFMPEGWEBUI_PORT</span> &gt;
+                    <span class="code-path">appsettings.json</span> 的 <span class="code-path">FFmpegWebUI:ListenPort</span> &gt;
+                    这里保存的值。只要上面几项都没有显式设置，这里改的就是实际使用的端口。
+                </span>
+            </div>
+        </section>
+
+        @* ── 7 · 保存 / 恢复默认 ──────────────────────────────────────── *@
+        <div class="action-bar" role="group" aria-label="设置操作">
+            @if (_loadFailed)
+            {
+                <div class="ffui-alert ffui-alert-danger bar-errors" role="alert">
+                    <span aria-hidden="true">⛔</span>
+                    <span>设置读取失败，为避免覆盖已有配置，保存已禁用。请先点击「重新读取设置」。</span>
+                </div>
+            }
+            else if (ValidationErrors.Count > 0)
+            {
+                <div class="ffui-alert ffui-alert-danger bar-errors" role="alert">
+                    <span aria-hidden="true">⚠️</span>
+                    <div>
+                        <strong>有 @ValidationErrors.Count 项需要修正，保存已禁用：</strong>
+                        <ul>
+                            @for (var i = 0; i < ValidationErrors.Count; i++)
+                            {
+                                <li @key="i">@ValidationErrors[i]</li>
+                            }
+                        </ul>
+                    </div>
+                </div>
+            }
+
+            <div class="action-bar-row">
+                <button type="button" class="ffui-btn ffui-btn-primary ffui-btn-lg" @onclick="SaveAsync" disabled="@(!CanSave)">
+                    @if (_isSaving)
+                    {
+                        <span class="spinner" aria-hidden="true"></span>
+                    }
+                    @(_isSaving ? "保存中…" : "💾 保存设置")
+                </button>
+                <button type="button" class="ffui-btn ffui-btn-lg" @onclick="OpenResetConfirm"
+                        disabled="@(_isSaving || _isResetting)">
+                    @if (_isResetting)
+                    {
+                        <span class="spinner" aria-hidden="true"></span>
+                    }
+                    🔄 恢复默认
+                </button>
+                @if (_loadFailed)
+                {
+                    <button type="button" class="ffui-btn" @onclick="RetryLoadAsync">重新读取设置</button>
+                }
+
+                @if (!_loadFailed)
+                {
+                    @if (HasChanges)
+                    {
+                        <span class="ffui-badge ffui-badge-warning">● 有未保存的更改</span>
+                    }
+                    else
+                    {
+                        <span class="ffui-badge ffui-badge-success">✓ 已保存</span>
+                    }
+                }
+
+                <span class="muted">设置只写在本机数据目录，不会上传。</span>
+            </div>
+        </div>
     }
 </div>
 
+<ConfirmDialog IsOpen="@_resetConfirmOpen"
+               IsOpenChanged="OnResetConfirmChanged"
+               Title="恢复默认设置"
+               Message="确定把全部设置恢复为默认值吗？"
+               Detail="FFmpeg 路径、输出规则、硬件加速、性能与界面设置都会被覆盖；任务历史不受影响。"
+               ConfirmText="恢复默认"
+               Danger="true"
+               IsBusy="_isResetting"
+               OnConfirm="ResetToDefaultsAsync"
+               OnCancel="OnResetConfirmCancel" />
+
+<ConfirmDialog IsOpen="@_clearConfirmOpen"
+               IsOpenChanged="OnClearConfirmChanged"
+               Title="清空全部历史"
+               Message="确定删除所有已结束的任务记录吗？"
+               Detail="删除后无法恢复；正在运行和排队中的任务会保留。"
+               ConfirmText="清空历史"
+               Danger="true"
+               IsBusy="_isClearingHistory"
+               OnConfirm="ClearHistoryConfirmedAsync"
+               OnCancel="OnClearConfirmCancel" />
+
+<style>
+    .settings-page { max-width: 1020px; }
+
+    .page-intro {
+        margin: -0.5rem 0 1.25rem;
+        color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+
+    section.ffui-panel { margin-bottom: 1.25rem; }
+
+    .panel-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+
+    .field { margin-top: 1rem; }
+    .field > label { display: block; font-weight: 500; margin-bottom: 0.35rem; font-size: 0.92rem; }
+
+    .field-help { display: block; font-size: 0.8rem; color: var(--text-muted); margin-top: 0.35rem; }
+
+    .field-error { display: block; font-size: 0.82rem; color: var(--danger-color); font-weight: 500; margin-top: 0.4rem; }
+
+    .field-divider { height: 1px; background: var(--border-color); margin: 1.25rem 0 0.25rem; }
+
+    .check-field { display: flex; gap: 0.6rem; align-items: flex-start; margin-top: 0.9rem; }
+    .check-field > input { flex: 0 0 auto; margin-top: 0.3rem; }
+    .check-field > div { flex: 1; min-width: 0; }
+    .check-field label { font-weight: 500; font-size: 0.92rem; }
+
+    .toolbar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.75rem; }
+    .toolbar .field-help { margin-top: 0; }
+
+    .kv-grid {
+        display: grid;
+        grid-template-columns: max-content minmax(0, 1fr);
+        gap: 0.45rem 1rem;
+        margin-top: 0.9rem;
+        font-size: 0.9rem;
+    }
+
+    .kv-key { color: var(--text-muted); }
+    .kv-value { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; word-break: break-all; }
+
+    .code-path {
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+        background: var(--code-bg);
+        color: var(--text-primary);
+        border-radius: var(--radius-sm);
+        padding: 0.1rem 0.35rem;
+        word-break: break-all;
+    }
+
+    .muted { color: var(--text-muted); font-size: 0.85rem; }
+
+    .resolved-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin: -0.4rem 0 0.9rem;
+        font-size: 0.85rem;
+    }
+    .resolved-label { color: var(--text-muted); }
+
+    .notices { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.9rem; }
+
+    .install-guide { margin-top: 0.9rem; display: block; }
+    .install-guide ol, .install-guide ul { margin: 0.4rem 0 0.2rem 1.1rem; padding: 0; }
+    .install-guide li { margin-bottom: 0.3rem; }
+    .install-paths { margin-top: 0.5rem; }
+
+    .report-summary { margin-top: 0.9rem; }
+
+    .encoder-groups { display: flex; flex-direction: column; gap: 1.1rem; margin-top: 1.1rem; }
+    .encoder-group-title { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.4rem; font-size: 0.95rem; }
+    .encoder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 0.5rem; }
+
+    .advanced {
+        margin-top: 1.1rem;
+        padding: 0.65rem 0.85rem;
+        background: var(--surface-3);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+    }
+    .advanced > summary { cursor: pointer; font-weight: 500; font-size: 0.92rem; }
+
+    .history-message { margin-top: 0.75rem; }
+
+    .action-bar {
+        position: sticky;
+        bottom: 0;
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+        margin-top: 1.5rem;
+        padding: 0.75rem 1rem;
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-md);
+    }
+
+    .action-bar-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+    .bar-errors ul { margin: 0.35rem 0 0 1.1rem; padding: 0; }
+
+    .test-result { font-size: 0.85rem; }
+    .test-result.ok { color: var(--success-color); }
+    .test-result.bad { color: var(--danger-color); }
+
+    @@media (max-width: 720px) {
+        .kv-grid { grid-template-columns: 1fr; }
+    }
+</style>
+
 @code {
-    private AppSettings _settings = new();
-    private string _originalTheme = "System";
-    private bool _isLoading = true;
+    /// <summary>
+    /// 可编辑的设置副本。用 record 是为了直接拿到「值相等」，
+    /// 从而在不改动服务里那份 AppSettings 实例的前提下判断是否有未保存的更改。
+    /// Id 不用复制：SaveSettingsAsync 会沿用数据库里已有记录的 Id。
+    /// </summary>
+    private sealed record SettingsForm
+    {
+        public string FFmpegPath { get; set; } = string.Empty;
+        public string FFprobePath { get; set; } = string.Empty;
+        public string DefaultOutputDirectory { get; set; } = string.Empty;
+        public OutputNamingRule OutputNaming { get; set; } = OutputNamingRule.Suffix;
+        public string OutputSuffix { get; set; } = "_converted";
+        public FileExistsAction ExistingFileAction { get; set; } = FileExistsAction.Ask;
+        public bool PreferHardwareAcceleration { get; set; } = true;
+        public bool PreferHardwareDecoding { get; set; }
+        public string PreferredHardwareEncoder { get; set; } = string.Empty;
+        public bool AutoFallbackToSoftware { get; set; } = true;
+        public int MaxConcurrentTasks { get; set; } = 1;
+        public int MaxLogLines { get; set; } = 500;
+        public int TaskHistoryRetentionDays { get; set; } = 30;
+        public string Theme { get; set; } = "System";
+        public string GlobalFFmpegArguments { get; set; } = string.Empty;
+        public bool NotifyOnCompletion { get; set; } = true;
+        public int ListenPort { get; set; } = 5265;
+
+        public static SettingsForm From(AppSettings settings) => new()
+        {
+            FFmpegPath = settings.FFmpegPath ?? string.Empty,
+            FFprobePath = settings.FFprobePath ?? string.Empty,
+            DefaultOutputDirectory = settings.DefaultOutputDirectory ?? string.Empty,
+            OutputNaming = settings.OutputNaming,
+            OutputSuffix = settings.OutputSuffix ?? string.Empty,
+            ExistingFileAction = settings.FileExistsAction,
+            PreferHardwareAcceleration = settings.PreferHardwareAcceleration,
+            PreferHardwareDecoding = settings.PreferHardwareDecoding,
+            PreferredHardwareEncoder = settings.PreferredHardwareEncoder ?? string.Empty,
+            AutoFallbackToSoftware = settings.AutoFallbackToSoftware,
+            MaxConcurrentTasks = settings.MaxConcurrentTasks,
+            MaxLogLines = settings.MaxLogLines,
+            TaskHistoryRetentionDays = settings.TaskHistoryRetentionDays,
+            Theme = settings.Theme ?? "System",
+            GlobalFFmpegArguments = settings.GlobalFFmpegArguments ?? string.Empty,
+            NotifyOnCompletion = settings.NotifyOnCompletion,
+            ListenPort = settings.ListenPort
+        };
+
+        public AppSettings ToAppSettings() => new()
+        {
+            FFmpegPath = FFmpegPath ?? string.Empty,
+            FFprobePath = FFprobePath ?? string.Empty,
+            DefaultOutputDirectory = DefaultOutputDirectory ?? string.Empty,
+            OutputNaming = OutputNaming,
+            OutputSuffix = OutputSuffix ?? string.Empty,
+            FileExistsAction = ExistingFileAction,
+            PreferHardwareAcceleration = PreferHardwareAcceleration,
+            PreferHardwareDecoding = PreferHardwareDecoding,
+            PreferredHardwareEncoder = PreferredHardwareEncoder ?? string.Empty,
+            AutoFallbackToSoftware = AutoFallbackToSoftware,
+            MaxConcurrentTasks = MaxConcurrentTasks,
+            MaxLogLines = MaxLogLines,
+            TaskHistoryRetentionDays = TaskHistoryRetentionDays,
+            Theme = Theme,
+            GlobalFFmpegArguments = GlobalFFmpegArguments ?? string.Empty,
+            NotifyOnCompletion = NotifyOnCompletion,
+            ListenPort = ListenPort
+        };
+    }
+
+    /// <summary>路径测试结果</summary>
+    private sealed record PathTestResult(bool Success, string Message);
+
+    /// <summary>按厂商分组的编码器，供界面渲染</summary>
+    private sealed record EncoderGroupView(string Key, string Label, List<HardwareEncoder> Encoders, int AvailableCount);
+
+    private static readonly char[] InvalidFileNameChars = Path.GetInvalidFileNameChars();
+
+    /// <summary>首选编码器下拉框中两个固定选项的 @key（@key 的值必须是唯一的）</summary>
+    private const string AutoEncoderOptionKey = "auto-encoder-option";
+    private const string SavedEncoderOptionKey = "saved-encoder-option";
+
+    private SettingsForm _form = new();
+    private SettingsForm _original = new();
+
+    private AppStatus? _status;
+    private HardwareDetectionReport? _report;
+    private bool _dataDirectoryWritable;
+
+    private bool _isReady;
+    private bool _loadFailed;
+    private bool _isChecking;
+    private bool _isScanning;
+    private TimeSpan _scanElapsed;
     private bool _isSaving;
-    private bool? _ffmpegTestResult;
-    private string _message = string.Empty;
-    private string _messageClass = string.Empty;
+    private bool _isResetting;
+    private bool _isCleaningHistory;
+    private bool _isClearingHistory;
+    private bool _isTestingFFmpeg;
+    private bool _isTestingFFprobe;
+
+    private PathTestResult? _ffmpegTest;
+    private PathTestResult? _ffprobeTest;
+
+    /// <summary>上次测试时使用的路径；输入框被改动后结果即视为过期，不再显示</summary>
+    private string _ffmpegTestPath = string.Empty;
+    private string _ffprobeTestPath = string.Empty;
+
+    private string? _historyMessage;
+
+    private bool _resetConfirmOpen;
+    private bool _clearConfirmOpen;
+
+    private string _checkedDirectory = string.Empty;
+    private string? _directoryError;
+
+    /// <summary>电路断开后只提示一次，避免刷屏</summary>
+    private bool _renderFailed;
+
+    private bool _disposed;
+
+    /// <summary>设置变更后是否需要强制重新检测环境（仅路径可能变化时需要）</summary>
+    private bool _forceStatusRefresh;
+
+    // ── 生命周期 ────────────────────────────────────────────────────────
+
+    protected override void OnInitialized()
+    {
+        SettingsService.SettingsChanged += OnSettingsChanged;
+    }
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadSettings();
+        await LoadSettingsAsync();
     }
 
-    private async Task LoadSettings()
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        _isLoading = true;
-        _settings = await SettingsService.GetSettingsAsync();
-        _originalTheme = _settings.Theme;
-        _isLoading = false;
+        if (!firstRender) return;
+
+        // 预渲染阶段不会走到这里，所以这两次较慢的检测只会在真实的交互式连接上执行一次
+        await LoadStatusAsync(forceRefresh: false, notify: false);
+        await LoadHardwareAsync(forceRefresh: false);
     }
 
-    private async Task SaveSettings()
+    public void Dispose()
     {
-        _isSaving = true;
-        _message = string.Empty;
-        StateHasChanged();
+        _disposed = true;
+        SettingsService.SettingsChanged -= OnSettingsChanged;
+    }
+
+    private void OnSettingsChanged(object? sender, EventArgs e)
+    {
+        // 事件可能由其它页面的线程触发，必须回到本组件的渲染上下文再更新界面；
+        // 组件已释放时直接退出，避免把异常抛回给触发方（SaveSettingsAsync）。
+        if (_disposed) return;
+
+        // 路径可能变了才强制重新探测（强制刷新会真实试跑硬件编码器，耗时几秒）；
+        // 改主题之类的设置用 10 秒缓存刷新即可，避免每次保存都扫一遍编码器。
+        _forceStatusRefresh = PathsMayHaveChanged();
+        _ = InvokeAsync(RefreshStatusAfterSettingsChangeAsync);
+    }
+
+    private async Task RefreshStatusAfterSettingsChangeAsync()
+    {
+        await LoadStatusAsync(forceRefresh: _forceStatusRefresh, notify: false);
+    }
+
+    /// <summary>当前设置的 FFmpeg/ffprobe 路径是否与已解析到的不同（不同就需要强制重扫）</summary>
+    private bool PathsMayHaveChanged()
+    {
+        if (_status is null) return true;
+
+        var typedFFmpeg = NormalizePathText(_form.FFmpegPath);
+        var typedProbe = NormalizePathText(_form.FFprobePath);
+
+        // 两个都留空：正常情况下就是「自动探测」，不需要强制重扫；
+        // 但如果之前是用设置里的路径解析的，说明用户刚把路径清空，需要重新探测。
+        if (typedFFmpeg.Length == 0 && typedProbe.Length == 0) return !_status.AutoDetected;
+
+        return !string.Equals(typedFFmpeg, NormalizePathText(_status.FFmpegPath), StringComparison.Ordinal)
+            || !string.Equals(typedProbe, NormalizePathText(_status.FFprobePath), StringComparison.Ordinal);
+    }
+
+    // ── 加载 ────────────────────────────────────────────────────────────
+
+    private async Task LoadSettingsAsync()
+    {
+        try
+        {
+            var settings = await SettingsService.GetSettingsAsync();
+            _original = SettingsForm.From(settings);
+            _form = SettingsForm.From(settings);
+            _loadFailed = false;
+        }
+        catch (Exception ex)
+        {
+            _loadFailed = true;
+            Toast.Error($"读取设置失败：{ex.Message}");
+        }
+        finally
+        {
+            _isReady = true;
+        }
+    }
+
+    private async Task RetryLoadAsync()
+    {
+        await LoadSettingsAsync();
+        if (!_loadFailed) Toast.Success("设置已重新读取");
+    }
+
+    private async Task LoadStatusAsync(bool forceRefresh, bool notify)
+    {
+        _isChecking = true;
+        try
+        {
+            var status = await AppStatusService.GetStatusAsync(forceRefresh);
+            _status = status;
+            _dataDirectoryWritable = AppStatusService.IsDataDirectoryWritable;
+
+            // 强制刷新时 AppStatusService 已经重新检测过硬件，这里同步取用它的结果，避免重复扫描
+            if (HardwareDetection.LastReport is { } latest) _report = latest;
+
+            if (notify) Toast.Success("环境信息已重新检测");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"环境检测失败：{ex.Message}");
+        }
+        finally
+        {
+            _isChecking = false;
+        }
+
+        await RefreshAsync();
+    }
+
+    private async Task RecheckAsync()
+    {
+        await LoadStatusAsync(forceRefresh: true, notify: true);
+    }
+
+    private async Task LoadHardwareAsync(bool forceRefresh)
+    {
+        _isScanning = true;
+        _scanElapsed = TimeSpan.Zero;
+        var watch = Stopwatch.StartNew();
 
         try
         {
-            var themeChanged = _settings.Theme != _originalTheme;
-            await SettingsService.SaveSettingsAsync(_settings);
-            _message = "✓ 设置已保存";
-            _messageClass = "success";
-            
-            // 如果主题改变，刷新页面以应用新主题
-            if (themeChanged)
+            var scan = HardwareDetection.DetectAsync(forceRefresh);
+
+            // 用户主动扫描可能持续十几秒，这里每 0.4 秒刷新一次已用时长，让等待有反馈
+            while (!scan.IsCompleted)
             {
-                _message = "✓ 设置已保存，正在应用新主题...";
-                StateHasChanged();
-                await Task.Delay(500);
-                Navigation.NavigateTo(Navigation.Uri, forceLoad: true);
+                await Task.WhenAny(scan, Task.Delay(400));
+                _scanElapsed = watch.Elapsed;
+                await RefreshAsync();
+            }
+
+            var report = await scan;
+            _report = report;
+            _scanElapsed = watch.Elapsed;
+
+            if (forceRefresh)
+            {
+                var seconds = _scanElapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+                Toast.Success($"硬件检测完成：{report.AvailableHardwareEncoders.Count} 个可用硬件编码器（耗时 {seconds} 秒）");
+
+                if (report.AvailableHardwareEncoders.Count == 0)
+                {
+                    Toast.Warning("本机没有检测到可用的硬件编码器，转换会使用 CPU 软件编码。");
+                }
             }
         }
         catch (Exception ex)
         {
-            _message = $"保存失败: {ex.Message}";
-            _messageClass = "error";
+            Toast.Error($"硬件编码器检测失败：{ex.Message}");
+        }
+        finally
+        {
+            watch.Stop();
+            _isScanning = false;
+        }
+
+        await RefreshAsync();
+    }
+
+    private async Task ScanHardwareAsync()
+    {
+        await LoadHardwareAsync(forceRefresh: true);
+    }
+
+    // ── 校验 ────────────────────────────────────────────────────────────
+
+    private bool HasChanges => _form != _original;
+
+    private bool HasAvailableHardware => AvailableEncoders.Count > 0;
+
+    private List<HardwareEncoder> AvailableEncoders =>
+        _report is null
+            ? new List<HardwareEncoder>()
+            : _report.AvailableHardwareEncoders
+                .OrderBy(e => FamilyOrder(e.Family))
+                .ThenBy(e => e.DisplayName, StringComparer.CurrentCulture)
+                .ToList();
+
+    private bool PreferredEncoderUnavailable =>
+        !string.IsNullOrWhiteSpace(_form.PreferredHardwareEncoder) &&
+        !AvailableEncoders.Any(e => string.Equals(e.Name, _form.PreferredHardwareEncoder, StringComparison.OrdinalIgnoreCase));
+
+    private string? DirectoryWritabilityError =>
+        string.Equals((_form.DefaultOutputDirectory ?? string.Empty).Trim(), _checkedDirectory, StringComparison.Ordinal)
+            ? _directoryError
+            : null;
+
+    private string? SuffixInvalidChars
+    {
+        get
+        {
+            var suffix = _form.OutputSuffix ?? string.Empty;
+            if (suffix.Length == 0) return null;
+            var index = suffix.IndexOfAny(InvalidFileNameChars);
+            if (index < 0) return null;
+            var invalid = suffix[index];
+            return invalid == '\0' ? "（空字符）" : invalid.ToString();
+        }
+    }
+
+    private List<string> ValidationErrors
+    {
+        get
+        {
+            var errors = new List<string>();
+
+            if (_form.OutputNaming == OutputNamingRule.Suffix && string.IsNullOrWhiteSpace(_form.OutputSuffix))
+                errors.Add("输出文件后缀：选择「添加后缀」时不能为空。");
+            else if (SuffixInvalidChars is { } bad)
+                errors.Add($"输出文件后缀：包含文件名不允许的字符「{bad}」。");
+
+            if (_form.MaxConcurrentTasks is < 1 or > 8)
+                errors.Add("同时执行的转换任务数：必须在 1 ~ 8 之间。");
+            if (_form.MaxLogLines is < 50 or > 20000)
+                errors.Add("单个任务保留的日志行数：必须在 50 ~ 20000 之间。");
+            if (_form.TaskHistoryRetentionDays is < 0 or > 3650)
+                errors.Add("任务历史保留天数：必须在 0 ~ 3650 之间。");
+            if (_form.ListenPort is < 0 or > 65535)
+                errors.Add("监听端口：必须在 0 ~ 65535 之间（0 表示自动选择空闲端口）。");
+            if (_form.Theme is not ("System" or "Light" or "Dark"))
+                errors.Add("主题：取值无效，请重新选择。");
+
+            if (DirectoryWritabilityError is { } directoryError)
+                errors.Add($"默认输出目录：{directoryError}");
+
+            return errors;
+        }
+    }
+
+    private bool CanSave => _isReady && !_loadFailed && !_isSaving && ValidationErrors.Count == 0;
+
+    // ── 保存 / 恢复默认 ─────────────────────────────────────────────────
+
+    private async Task SaveAsync()
+    {
+        if (!CanSave) return;
+
+        _isSaving = true;
+        try
+        {
+            var toSave = _form.ToAppSettings();
+
+            // 目录可写性放在保存时检查：IsDirectoryWritable 会尝试创建目录并写测试文件，
+            // 不适合在每次输入时调用。
+            var directory = (toSave.DefaultOutputDirectory ?? string.Empty).Trim();
+            if (directory.Length > 0 && !FileService.IsDirectoryWritable(directory))
+            {
+                _checkedDirectory = directory;
+                _directoryError = $"不可写或无法创建：{directory}。请换一个目录，或先创建它并授予写权限。";
+                Toast.Error("默认输出目录不可写，设置未保存。");
+                return;
+            }
+            _checkedDirectory = directory;
+            _directoryError = null;
+
+            await SettingsService.SaveSettingsAsync(toSave);
+
+            // SaveSettingsAsync 会调用 Normalize()，可能修正取值（例如空后缀）。
+            // 以保存后的实际设置为准重新同步，避免界面与实际不一致。
+            var saved = await SettingsService.GetSettingsAsync();
+            _original = SettingsForm.From(saved);
+            _form = SettingsForm.From(saved);
+
+            Toast.Success("设置已保存");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"保存失败：{ex.Message}");
         }
         finally
         {
             _isSaving = false;
         }
+
+        await RefreshAsync();
     }
 
-    private async Task ResetSettings()
+    private void OpenResetConfirm() => _resetConfirmOpen = true;
+
+    private void OnResetConfirmChanged(bool value) => _resetConfirmOpen = value;
+
+    private void OnResetConfirmCancel() => _resetConfirmOpen = false;
+
+    private async Task ResetToDefaultsAsync()
     {
-        var oldTheme = _settings.Theme;
-        await SettingsService.ResetToDefaultAsync();
-        await LoadSettings();
-        _message = "✓ 已恢复默认设置";
-        _messageClass = "success";
-        
-        // 如果主题改变，刷新页面
-        if (_settings.Theme != oldTheme)
+        _resetConfirmOpen = false;
+        _isResetting = true;
+
+        try
         {
-            _message = "✓ 已恢复默认设置，正在应用主题...";
-            StateHasChanged();
-            await Task.Delay(500);
-            Navigation.NavigateTo(Navigation.Uri, forceLoad: true);
+            await SettingsService.ResetToDefaultAsync();
+
+            var settings = await SettingsService.GetSettingsAsync();
+            _original = SettingsForm.From(settings);
+            _form = SettingsForm.From(settings);
+
+            _ffmpegTest = null;
+            _ffmpegTestPath = string.Empty;
+            _ffprobeTest = null;
+            _ffprobeTestPath = string.Empty;
+            _checkedDirectory = string.Empty;
+            _directoryError = null;
+            _historyMessage = null;
+
+            await ApplyThemeAsync(_form.Theme);
+            Toast.Success("已恢复默认设置");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"恢复默认失败：{ex.Message}");
+        }
+        finally
+        {
+            _isResetting = false;
+        }
+
+        await RefreshAsync();
+    }
+
+    // ── 路径测试 ────────────────────────────────────────────────────────
+
+    /// <summary>只有当前输入与上次测试的路径一致时才展示测试结果（路径一改，旧结论就作废）</summary>
+    private PathTestResult? FFmpegTestShown =>
+        _ffmpegTest is not null && string.Equals(NormalizePathText(_form.FFmpegPath), _ffmpegTestPath, StringComparison.Ordinal)
+            ? _ffmpegTest
+            : null;
+
+    private PathTestResult? FFprobeTestShown =>
+        _ffprobeTest is not null && string.Equals(NormalizePathText(_form.FFprobePath), _ffprobeTestPath, StringComparison.Ordinal)
+            ? _ffprobeTest
+            : null;
+
+    private static string NormalizePathText(string? value) => (value ?? string.Empty).Trim().Trim('"');
+
+    private async Task TestFFmpegAsync()
+    {
+        _isTestingFFmpeg = true;
+        _ffmpegTest = null;
+
+        try
+        {
+            var typed = NormalizePathText(_form.FFmpegPath);
+            var source = typed.Length > 0 ? $"路径「{typed}」" : "系统 PATH";
+            _ffmpegTestPath = typed;
+
+            var version = await SettingsService.GetFFmpegVersionAsync(typed);
+            if (!string.IsNullOrWhiteSpace(version))
+            {
+                _ffmpegTest = new PathTestResult(true, $"✓ 可用（{source}）：{version}");
+                Toast.Success("FFmpeg 可用");
+            }
+            else
+            {
+                var valid = await SettingsService.ValidateFFmpegPathAsync(typed);
+                var message = valid
+                    ? $"✗ 能执行但读不到版本信息（{source}）：ffmpeg -version 没有返回可识别的内容，请确认它真的是 FFmpeg。"
+                    : typed.Length > 0
+                        ? $"✗ 不可用：无法执行「{typed}」（文件不存在、没有执行权限，或不是 FFmpeg 可执行文件）。"
+                        : "✗ 不可用：系统 PATH 中没有找到可执行的 ffmpeg，请在上面填写完整路径。";
+                _ffmpegTest = new PathTestResult(false, message);
+                Toast.Error("FFmpeg 测试未通过");
+            }
+        }
+        catch (Exception ex)
+        {
+            _ffmpegTest = new PathTestResult(false, $"✗ 测试出错：{ex.Message}");
+            Toast.Error($"测试 FFmpeg 出错：{ex.Message}");
+        }
+        finally
+        {
+            _isTestingFFmpeg = false;
+        }
+
+        await RefreshAsync();
+    }
+
+    private async Task TestFFprobeAsync()
+    {
+        _isTestingFFprobe = true;
+        _ffprobeTest = null;
+
+        try
+        {
+            await Task.Yield();
+
+            var typed = NormalizePathText(_form.FFprobePath);
+            var resolved = _status?.FFprobePath ?? string.Empty;
+            var target = typed.Length > 0 ? typed : resolved;
+            _ffprobeTestPath = typed;
+
+            if (target.Length > 0 && FileService.IsFileAccessible(target))
+            {
+                _ffprobeTest = new PathTestResult(true,
+                    $"✓ 文件存在且可读：{target}（只检查了文件是否可访问，没有真的执行 ffprobe）");
+            }
+            else
+            {
+                // 只写了名字（没有路径分隔符）时由系统 PATH 解析，这里按 PATH 目录查找同名可执行文件
+                var lookupName = typed.Length > 0 && !HasDirectorySeparator(typed) ? typed : "ffprobe";
+                var onPath = FindOnPath(lookupName);
+
+                if (onPath is not null)
+                {
+                    _ffprobeTest = new PathTestResult(true,
+                        $"✓ 在系统 PATH 中找到：{onPath}（只检查了文件是否存在，没有真的执行 ffprobe）");
+                }
+                else
+                {
+                    var targetNote = target.Length > 0
+                        ? $"「{target}」不是可读取的文件"
+                        : "输入框为空，应用也还没有解析出 ffprobe 路径";
+                    _ffprobeTest = new PathTestResult(false,
+                        $"✗ 未找到可用的 ffprobe：{targetNote}，系统 PATH 中也没有 {lookupName}。" +
+                        $"（本次只做了文件检查，没有执行 ffprobe；ffprobe 通常与 ffmpeg 一起安装，可填写 ffmpeg 同目录下的 ffprobe{(AppPaths.IsWindows ? ".exe" : string.Empty)}）");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _ffprobeTest = new PathTestResult(false, $"✗ 检查出错：{ex.Message}");
+            Toast.Error($"测试 ffprobe 出错：{ex.Message}");
+        }
+        finally
+        {
+            _isTestingFFprobe = false;
+        }
+
+        await RefreshAsync();
+    }
+
+    private static bool HasDirectorySeparator(string value) =>
+        value.Contains('/') || value.Contains('\\');
+
+    /// <summary>在系统 PATH 中查找同名可执行文件（只判断文件存在，不执行它）</summary>
+    private static string? FindOnPath(string name)
+    {
+        var pathVariable = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(pathVariable)) return null;
+
+        foreach (var entry in pathVariable.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var directory = entry.Trim().Trim('"');
+            if (directory.Length == 0) continue;
+
+            var candidate = Path.Combine(directory, name + AppPaths.ExeSuffix);
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        return null;
+    }
+
+    // ── 主题 / 通知 ─────────────────────────────────────────────────────
+
+    private async Task OnThemeChangedAsync()
+    {
+        await ApplyThemeAsync(_form.Theme);
+    }
+
+    private async Task ApplyThemeAsync(string theme)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("ffui.applyTheme", theme);
+
+            // 与服务端首屏保持一致：把主题写进 Cookie（与 MainLayout 相同的做法）
+            var safe = Uri.EscapeDataString(string.IsNullOrWhiteSpace(theme) ? "System" : theme);
+            await JS.InvokeVoidAsync("eval",
+                $"document.cookie='ffui-theme={safe};path=/;max-age=31536000;SameSite=Lax'");
+        }
+        catch (Exception ex)
+        {
+            Toast.Warning($"主题已记录，但本页预览失败（浏览器连接不可用）：{ex.Message}");
         }
     }
 
-    private async Task TestFFmpegPath()
+    private async Task OnNotifyChangedAsync()
     {
-        _ffmpegTestResult = null;
-        StateHasChanged();
+        if (!_form.NotifyOnCompletion) return;
 
-        _ffmpegTestResult = await SettingsService.ValidateFFmpegPathAsync(_settings.FFmpegPath);
-        StateHasChanged();
+        try
+        {
+            var granted = await JS.InvokeAsync<bool>("ffui.requestNotificationPermission");
+            if (granted)
+            {
+                Toast.Success("浏览器已允许通知：任务完成后会弹出提醒。");
+            }
+            else
+            {
+                Toast.Warning("浏览器没有授予通知权限：勾选会保留，但转换完成时不会弹出系统通知。可在浏览器地址栏的站点设置里重新允许。");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"请求通知权限失败：{ex.Message}");
+        }
+    }
+
+    // ── 历史数据 ────────────────────────────────────────────────────────
+
+    private async Task CleanupHistoryAsync()
+    {
+        var days = _form.TaskHistoryRetentionDays;
+        if (days <= 0)
+        {
+            Toast.Warning("保留天数为 0，没有可清理的时间范围；请先填写天数，或使用「清空全部历史」。");
+            return;
+        }
+
+        _isCleaningHistory = true;
+        try
+        {
+            var threshold = DateTime.UtcNow.AddDays(-days);
+            var removed = await TaskService.CleanupHistoryAsync(threshold);
+
+            _historyMessage =
+                $"已清理 {FormatLocalTime(threshold)} 之前的记录：删除 {removed} 条（保留天数 {days} 天）。";
+            Toast.Success(removed > 0 ? $"已清理 {removed} 条历史记录" : "没有需要清理的历史记录");
+        }
+        catch (Exception ex)
+        {
+            _historyMessage = null;
+            Toast.Error($"清理历史失败：{ex.Message}");
+        }
+        finally
+        {
+            _isCleaningHistory = false;
+        }
+
+        await RefreshAsync();
+    }
+
+    private void OpenClearConfirm() => _clearConfirmOpen = true;
+
+    private void OnClearConfirmChanged(bool value) => _clearConfirmOpen = value;
+
+    private void OnClearConfirmCancel() => _clearConfirmOpen = false;
+
+    private async Task ClearHistoryConfirmedAsync()
+    {
+        _clearConfirmOpen = false;
+        _isClearingHistory = true;
+
+        try
+        {
+            var removed = await TaskService.ClearHistoryAsync();
+            _historyMessage = $"已清空历史记录，共删除 {removed} 条；运行中和等待中的任务已保留。";
+            Toast.Success($"已清空 {removed} 条历史记录");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"清空历史失败：{ex.Message}");
+        }
+        finally
+        {
+            _isClearingHistory = false;
+        }
+
+        await RefreshAsync();
+    }
+
+    // ── 展示辅助 ────────────────────────────────────────────────────────
+
+    private bool IsWindows => AppPaths.IsWindows;
+    private bool IsMacOS => AppPaths.IsMacOS;
+
+    private string ExeSuffix => AppPaths.ExeSuffix;
+
+    private string ElapsedSeconds => _scanElapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+
+    private string ResolvedFFmpegPath =>
+        _status is null
+            ? "检测中…"
+            : string.IsNullOrWhiteSpace(_status.FFmpegPath) ? "尚未解析到 ffmpeg" : _status.FFmpegPath;
+
+    private string ResolvedFFprobePath =>
+        _status is null
+            ? "检测中…"
+            : string.IsNullOrWhiteSpace(_status.FFprobePath) ? "尚未解析到 ffprobe" : _status.FFprobePath;
+
+    private string FileExistsActionHelp => _form.ExistingFileAction switch
+    {
+        FileExistsAction.Ask => "转换前在界面询问你；批量处理时自动改为重命名，避免卡住等你确认。",
+        FileExistsAction.Overwrite => "直接覆盖同名文件（已有输出的内容会丢失）。命令里会自动加 -y，不会等待确认。",
+        FileExistsAction.Skip => "保留已有文件、跳过该文件的转换，任务会标记为「已跳过」。",
+        FileExistsAction.Rename => "自动换成不冲突的新名字（如 video (1).mp4），原文件和已有输出都保留。",
+        _ => "未知的处理方式，实际会按「重命名」执行。"
+    };
+
+    private string SuffixPreview
+    {
+        get
+        {
+            const string sample = "video.mp4";
+            if (_form.OutputNaming == OutputNamingRule.Original)
+                return $"{sample} → {sample}（保持原名）";
+
+            var suffix = _form.OutputSuffix ?? string.Empty;
+            return $"{sample} → video{suffix}.mp4";
+        }
+    }
+
+    private IReadOnlyList<EncoderGroupView> EncoderGroups
+    {
+        get
+        {
+            if (_report is null) return Array.Empty<EncoderGroupView>();
+
+            return _report.Encoders
+                .GroupBy(e => string.IsNullOrWhiteSpace(e.Family) ? "other" : e.Family.ToLowerInvariant())
+                .Select(group => new EncoderGroupView(
+                    group.Key,
+                    group.Key == "other" ? "其他编码器" : EncoderCatalog.FamilyDisplayName(group.Key),
+                    group.OrderByDescending(e => e.IsAvailable).ThenBy(e => e.DisplayName, StringComparer.CurrentCulture).ToList(),
+                    group.Count(e => e.IsAvailable)))
+                .OrderByDescending(group => group.AvailableCount > 0)
+                .ThenBy(group => FamilyOrder(group.Key))
+                .ThenBy(group => group.Label, StringComparer.CurrentCulture)
+                .ToList();
+        }
+    }
+
+    private static int FamilyOrder(string? family) => (family ?? string.Empty).ToLowerInvariant() switch
+    {
+        "nvenc" => 0,
+        "qsv" => 1,
+        "amf" => 2,
+        "videotoolbox" => 3,
+        "vaapi" => 4,
+        "vulkan" => 5,
+        "mf" => 6,
+        "software" => 7,
+        _ => 8
+    };
+
+    private void ClearPreferredEncoder() => _form.PreferredHardwareEncoder = string.Empty;
+
+    private static string FormatLocalTime(DateTime value) =>
+        value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+    /// <summary>请求一次渲染；页面已关闭（电路断开）时只提示一次，不再抛出</summary>
+    private async Task RefreshAsync()
+    {
+        try
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            if (_renderFailed) return;
+            _renderFailed = true;
+            Toast.Warning($"界面刷新失败（页面可能已关闭）：{ex.Message}");
+        }
     }
 }
-
-<style>
-    .settings-container {
-        max-width: 800px;
-        margin: 0 auto;
-    }
-
-    h1 {
-        margin-bottom: 2rem;
-    }
-
-    .loading {
-        text-align: center;
-        padding: 3rem;
-        color: #666;
-    }
-
-    .settings-sections {
-        display: flex;
-        flex-direction: column;
-        gap: 1.5rem;
-        margin-bottom: 2rem;
-    }
-
-    .settings-section {
-        background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 8px;
-    }
-
-    .settings-section h2 {
-        margin: 0 0 1rem 0;
-        font-size: 1.1rem;
-        color: #333;
-    }
-
-    .form-group {
-        margin-bottom: 1rem;
-    }
-
-    .form-group:last-child {
-        margin-bottom: 0;
-    }
-
-    .form-group label {
-        display: block;
-        font-weight: 500;
-        margin-bottom: 0.5rem;
-        color: #333;
-    }
-
-    .form-group input[type="text"],
-    .form-group input[type="number"],
-    .form-group select {
-        width: 100%;
-        padding: 0.6rem;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        font-size: 0.95rem;
-    }
-
-    .form-group.checkbox label {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        cursor: pointer;
-        font-weight: normal;
-    }
-
-    .form-group.checkbox input {
-        width: auto;
-    }
-
-    .form-group.inline-action {
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-        margin-top: -0.5rem;
-        margin-bottom: 1rem;
-    }
-
-    .btn-test {
-        padding: 0.5rem 1rem;
-        background: #17a2b8;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 0.9rem;
-        white-space: nowrap;
-    }
-
-    .btn-test:hover {
-        background: #138496;
-    }
-
-    .test-result {
-        font-size: 0.9rem;
-        font-weight: 500;
-    }
-
-    .test-result.success {
-        color: #28a745;
-    }
-
-    .test-result.error {
-        color: #dc3545;
-    }
-
-    .help-text {
-        display: block;
-        font-size: 0.8rem;
-        color: #888;
-        margin-top: 0.25rem;
-    }
-
-    .action-section {
-        display: flex;
-        gap: 1rem;
-        margin-bottom: 1.5rem;
-    }
-
-    .btn-primary,
-    .btn-secondary {
-        padding: 0.75rem 1.5rem;
-        border-radius: 6px;
-        font-size: 0.95rem;
-        cursor: pointer;
-    }
-
-    .btn-primary {
-        background: #007bff;
-        color: white;
-        border: none;
-    }
-
-    .btn-primary:hover:not(:disabled) {
-        background: #0056b3;
-    }
-
-    .btn-primary:disabled {
-        background: #ccc;
-        cursor: not-allowed;
-    }
-
-    .btn-secondary {
-        background: #6c757d;
-        color: white;
-        border: none;
-    }
-
-    .btn-secondary:hover {
-        background: #5a6268;
-    }
-
-    .message {
-        padding: 1rem;
-        border-radius: 6px;
-    }
-
-    .message.success {
-        background: #d4edda;
-        color: #155724;
-    }
-
-    .message.error {
-        background: #f8d7da;
-        color: #721c24;
-    }
-</style>

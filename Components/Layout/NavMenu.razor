@@ -1,59 +1,36 @@
-﻿<div class="top-row ps-3 navbar navbar-dark">
-    <div class="container-fluid">
-        <a class="navbar-brand" href="">
-            <span class="brand-icon">🎬</span> FFmpeg WebUI
-        </a>
-    </div>
+@using FFmpegWebUI.Services
+
+<div class="brand">
+    <span class="brand-icon" aria-hidden="true">🎬</span>
+    <span class="brand-text">@AppInfo.Name</span>
 </div>
 
-<input type="checkbox" title="Navigation menu" class="navbar-toggler" />
+<nav class="nav-menu" aria-label="主导航">
+    @foreach (var item in MenuItems)
+    {
+        <NavLink class="nav-link" href="@item.Href"
+                 Match="@(item.Exact ? NavLinkMatch.All : NavLinkMatch.Prefix)">
+            <span class="nav-icon" aria-hidden="true">@item.Icon</span>
+            <span class="nav-text">@item.Label</span>
+        </NavLink>
+    }
+</nav>
 
-<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
-    <nav class="nav flex-column">
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
-                <span class="nav-icon">🏠</span> 首页
-            </NavLink>
-        </div>
-
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="convert">
-                <span class="nav-icon">🔄</span> 转换
-            </NavLink>
-        </div>
-
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="templates">
-                <span class="nav-icon">📋</span> 模板
-            </NavLink>
-        </div>
-
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="batch">
-                <span class="nav-icon">📁</span> 批量处理
-            </NavLink>
-        </div>
-
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="tasks">
-                <span class="nav-icon">📋</span> 任务列表
-            </NavLink>
-        </div>
-
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="settings">
-                <span class="nav-icon">⚙️</span> 设置
-            </NavLink>
-        </div>
-    </nav>
+<div class="nav-footer">
+    <div class="nav-footer-line">@AppPaths.PlatformDisplayName · .NET @Environment.Version.Major</div>
+    <div class="nav-footer-line mono">v@(AppInfo.Version)</div>
 </div>
 
-<style>
-    .brand-icon {
-        font-size: 1.2rem;
-    }
-    
-    .nav-icon {
-        margin-right: 0.5rem;
-    }
-</style>
+@code {
+    private sealed record MenuItem(string Href, string Label, string Icon, bool Exact = false);
+
+    private static readonly MenuItem[] MenuItems =
+    [
+        new("", "首页", "🏠", Exact: true),
+        new("convert", "转换", "🔄"),
+        new("batch", "批量处理", "📁"),
+        new("templates", "模板", "📋"),
+        new("tasks", "任务列表", "🗂️"),
+        new("settings", "设置", "⚙️"),
+    ];
+}

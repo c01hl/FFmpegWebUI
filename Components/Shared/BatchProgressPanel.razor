@@ -1,308 +1,310 @@
-@using FFmpegWebUI.Models
+@using LiteDB
+@inject IToastService Toast
+@inject IJSRuntime JS
+@inject IFileService FileService
 
-<div class="batch-progress-panel">
-    <div class="panel-header">
-        <h3>📊 批量处理进度</h3>
-        <span class="overall-status @GetOverallStatusClass()">
-            @GetOverallStatusText()
-        </span>
-    </div>
+@{
+    var total = Tasks.Count;
+    var completed = Tasks.Count(t => t.Status == TaskStatus.Completed);
+    var failed = Tasks.Count(t => t.Status == TaskStatus.Failed);
+    var cancelled = Tasks.Count(t => t.Status == TaskStatus.Cancelled);
+    var skipped = Tasks.Count(t => t.Status == TaskStatus.Skipped);
+    var running = Tasks.Count(t => t.Status == TaskStatus.Running);
+    var pending = Tasks.Count(t => t.Status == TaskStatus.Pending);
+    var finished = completed + failed + cancelled + skipped;
+    var percent = total > 0 ? Math.Clamp(finished * 100.0 / total, 0, 100) : 0;
+    var visible = VisibleTasks;
+    var hidden = Math.Max(0, total - visible.Count);
+}
 
-    <div class="overall-progress">
-        <div class="progress-info">
-            <span>已完成: @CompletedCount / @TotalCount</span>
-            <span>@OverallPercentage.ToString("F0")%</span>
-        </div>
-        <div class="progress-track">
-            <div class="progress-fill completed" style="width: @CompletedPercentage%"></div>
-            <div class="progress-fill failed" style="width: @FailedPercentage%"></div>
-            <div class="progress-fill running" style="width: @RunningPercentage%"></div>
-        </div>
-    </div>
-
-    <div class="stats-grid">
-        <div class="stat-item">
-            <span class="stat-value">@TotalCount</span>
-            <span class="stat-label">总计</span>
-        </div>
-        <div class="stat-item completed">
-            <span class="stat-value">@CompletedCount</span>
-            <span class="stat-label">已完成</span>
-        </div>
-        <div class="stat-item failed">
-            <span class="stat-value">@FailedCount</span>
-            <span class="stat-label">失败</span>
-        </div>
-        <div class="stat-item pending">
-            <span class="stat-value">@PendingCount</span>
-            <span class="stat-label">等待中</span>
-        </div>
-    </div>
-
-    @if (CurrentTask != null)
+<div class="batch-progress">
+    @if (total == 0)
     {
-        <div class="current-task">
-            <h4>当前处理</h4>
-            <div class="task-name">@Path.GetFileName(CurrentTask.InputPath)</div>
-            <div class="task-progress">
-                <div class="progress-track small">
-                    <div class="progress-fill running" style="width: @CurrentTask.Progress%"></div>
-                </div>
-                <span>@CurrentTask.Progress.ToString("F1")%</span>
-            </div>
-            @if (CurrentTask.ProcessingSpeed.HasValue)
-            {
-                <div class="task-speed">速度: @CurrentTask.ProcessingSpeed.Value.ToString("F2")x</div>
-            }
-        </div>
+        <div class="ffui-empty-state">还没有开始批量处理。添加文件、选好模板后点击「开始批量处理」。</div>
     }
-
-    @if (FailedTasks.Count > 0)
+    else
     {
-        <div class="failed-tasks">
-            <h4>❌ 失败任务 (@FailedTasks.Count)</h4>
-            @foreach (var task in FailedTasks.Take(5))
+        <div class="summary" aria-live="polite">
+            <div class="summary-main">
+                <span class="summary-count">@finished / @total</span>
+                <span class="muted">已处理</span>
+                @if (running > 0)
+                {
+                    <span class="ffui-badge ffui-badge-info">@running 个进行中</span>
+                }
+                @if (pending > 0)
+                {
+                    <span class="ffui-badge">@pending 个等待中</span>
+                }
+                @if (!IsProcessing && finished == total)
+                {
+                    <span class="ffui-badge @(failed + cancelled == 0 ? "ffui-badge-success" : "ffui-badge-warning")">
+                        @(failed + cancelled == 0 ? "全部成功" : "已完成，含失败项")
+                    </span>
+                }
+            </div>
+
+            <div class="ffui-progress-track" role="progressbar"
+                 aria-valuemin="0" aria-valuemax="100"
+                 aria-valuenow="@percent.ToString("0", CultureInfo.InvariantCulture)"
+                 aria-label="批量处理总进度">
+                <div class="ffui-progress-fill" style="width:@(percent.ToString("0.##", CultureInfo.InvariantCulture))%"></div>
+            </div>
+
+            <div class="counters">
+                <span class="counter ok">✅ 已完成 @completed</span>
+                @if (failed > 0)
+                {
+                    <span class="counter bad">❌ 失败 @failed</span>
+                }
+                @if (cancelled > 0)
+                {
+                    <span class="counter warn">⏹️ 已取消 @cancelled</span>
+                }
+                @if (skipped > 0)
+                {
+                    <span class="counter warn">⏭️ 已跳过 @skipped</span>
+                }
+                @if (Elapsed is { } elapsed)
+                {
+                    <span class="counter muted">已用时 @FormatDuration(elapsed)</span>
+                }
+                @if (EtaSeconds is { } eta)
+                {
+                    <span class="counter muted">预计还需 @FormatDuration(TimeSpan.FromSeconds(eta))</span>
+                }
+            </div>
+        </div>
+
+        <div class="task-rows" role="list">
+            @foreach (var task in visible)
             {
-                <div class="failed-item">
-                    <span class="failed-name">@Path.GetFileName(task.InputPath)</span>
-                    <span class="failed-reason">@task.ErrorMessage</span>
+                <div class="task-row @RowClass(task.Status)" role="listitem" @key="task.Id">
+                    <span class="row-status" aria-hidden="true">@StatusIcon(task.Status)</span>
+
+                    <div class="row-main">
+                        <div class="row-name" title="@task.InputPath">@Path.GetFileName(task.InputPath)</div>
+                        <div class="row-sub">
+                            <span class="ffui-badge @StatusBadgeClass(task.Status)">@StatusText(task.Status)</span>
+                            @if (task.Status == TaskStatus.Running)
+                            {
+                                <span class="muted">@task.Progress.ToString("0.#", CultureInfo.InvariantCulture)%</span>
+                                @if (task.ProcessingSpeed is > 0)
+                                {
+                                    <span class="muted">@task.ProcessingSpeed.Value.ToString("0.##", CultureInfo.InvariantCulture)x</span>
+                                }
+                            }
+                            else if (task.OutputFileSize is > 0)
+                            {
+                                <span class="muted">@FileService.FormatFileSize(task.OutputFileSize.Value)</span>
+                            }
+                            @if (!string.IsNullOrEmpty(task.ErrorMessage))
+                            {
+                                <span class="row-error" title="@task.ErrorMessage">@Shorten(task.ErrorMessage, 90)</span>
+                            }
+                        </div>
+                    </div>
+
+                    <div class="row-actions">
+                        @if (task.Status == TaskStatus.Running)
+                        {
+                            <button type="button" class="ffui-btn ffui-btn-sm ffui-btn-danger"
+                                    @onclick="() => OnCancel.InvokeAsync(task.Id)">终止</button>
+                        }
+                        else if (task.Status == TaskStatus.Pending)
+                        {
+                            <button type="button" class="ffui-btn ffui-btn-sm"
+                                    @onclick="() => OnCancel.InvokeAsync(task.Id)">取消</button>
+                        }
+                        else
+                        {
+                            <button type="button" class="ffui-btn ffui-btn-sm"
+                                    @onclick="() => OnRetry.InvokeAsync(task.Id)">重试</button>
+                        }
+
+                        @if (task.Status is TaskStatus.Failed or TaskStatus.Cancelled && !string.IsNullOrEmpty(task.ErrorMessage))
+                        {
+                            <button type="button" class="ffui-btn ffui-btn-sm" @onclick="() => CopyErrorAsync(task)">
+                                复制错误
+                            </button>
+                        }
+
+                        @if (task.Status == TaskStatus.Completed)
+                        {
+                            <button type="button" class="ffui-btn ffui-btn-sm"
+                                    @onclick="() => OnOpenOutputFolder.InvokeAsync(task.OutputPath)">
+                                打开目录
+                            </button>
+                        }
+                    </div>
                 </div>
             }
-            @if (FailedTasks.Count > 5)
-            {
-                <div class="more-failed">还有 @(FailedTasks.Count - 5) 个失败任务...</div>
-            }
         </div>
+
+        @if (hidden > 0 || _showAll)
+        {
+            <button type="button" class="ffui-btn ffui-btn-sm more-btn" @onclick="ToggleShowAll">
+                @(_showAll ? "只看进行中与失败的任务" : $"还有 {hidden} 个任务，展开全部")
+            </button>
+        }
     }
 </div>
 
-@code {
-    [Parameter]
-    public int TotalCount { get; set; }
-
-    [Parameter]
-    public int CompletedCount { get; set; }
-
-    [Parameter]
-    public int FailedCount { get; set; }
-
-    [Parameter]
-    public int RunningCount { get; set; }
-
-    [Parameter]
-    public ConversionTask? CurrentTask { get; set; }
-
-    [Parameter]
-    public List<ConversionTask> FailedTasks { get; set; } = [];
-
-    [Parameter]
-    public bool IsProcessing { get; set; }
-
-    private int PendingCount => TotalCount - CompletedCount - FailedCount - RunningCount;
-
-    private double OverallPercentage => TotalCount > 0 
-        ? ((CompletedCount + FailedCount) * 100.0 / TotalCount)
-        : 0;
-
-    private double CompletedPercentage => TotalCount > 0 
-        ? (CompletedCount * 100.0 / TotalCount) 
-        : 0;
-
-    private double FailedPercentage => TotalCount > 0 
-        ? (FailedCount * 100.0 / TotalCount) 
-        : 0;
-
-    private double RunningPercentage => TotalCount > 0 
-        ? (RunningCount * 100.0 / TotalCount) 
-        : 0;
-
-    private string GetOverallStatusClass()
-    {
-        if (!IsProcessing && CompletedCount + FailedCount == TotalCount)
-        {
-            return FailedCount == 0 ? "completed" : "failed";
-        }
-        if (IsProcessing) return "running";
-        return "pending";
-    }
-
-    private string GetOverallStatusText()
-    {
-        if (!IsProcessing && CompletedCount + FailedCount == TotalCount)
-        {
-            return FailedCount == 0 ? "✓ 全部完成" : $"⚠️ 完成 ({FailedCount} 失败)";
-        }
-        if (IsProcessing) return "⏳ 处理中...";
-        return "○ 等待开始";
-    }
-}
-
 <style>
-    .batch-progress-panel {
-        background: #f8f9fa;
-        border-radius: 8px;
-        padding: 1.25rem;
-    }
+    .summary { margin-bottom: 0.85rem; }
+    .summary-main { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; flex-wrap: wrap; }
+    .summary-count { font-size: 1.15rem; font-weight: 650; color: var(--text-primary); }
+    .muted { color: var(--text-muted); font-size: 0.83rem; }
+    .counters { display: flex; gap: 0.9rem; margin-top: 0.5rem; flex-wrap: wrap; font-size: 0.84rem; }
+    .counter.ok { color: var(--success-color); }
+    .counter.bad { color: var(--danger-color); }
+    .counter.warn { color: var(--warning-color); }
+    .counter.muted { color: var(--text-muted); }
 
-    .panel-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1rem;
-    }
+    .task-rows { display: flex; flex-direction: column; gap: 0.4rem; max-height: 460px; overflow-y: auto; }
 
-    .panel-header h3 {
-        margin: 0;
-        font-size: 1.1rem;
-    }
-
-    .overall-status {
-        padding: 0.3rem 0.8rem;
-        border-radius: 4px;
-        font-size: 0.85rem;
-        font-weight: 500;
-    }
-
-    .overall-status.completed { background: #d4edda; color: #155724; }
-    .overall-status.failed { background: #f8d7da; color: #721c24; }
-    .overall-status.running { background: #cce5ff; color: #004085; }
-    .overall-status.pending { background: #e9ecef; color: #666; }
-
-    .overall-progress {
-        margin-bottom: 1rem;
-    }
-
-    .progress-info {
-        display: flex;
-        justify-content: space-between;
-        margin-bottom: 0.5rem;
-        font-size: 0.9rem;
-    }
-
-    .progress-track {
-        height: 20px;
-        background: #e9ecef;
-        border-radius: 10px;
-        overflow: hidden;
-        display: flex;
-    }
-
-    .progress-track.small {
-        height: 8px;
-        border-radius: 4px;
-        flex: 1;
-        margin-right: 0.5rem;
-    }
-
-    .progress-fill {
-        height: 100%;
-        transition: width 0.3s;
-    }
-
-    .progress-fill.completed { background: #28a745; }
-    .progress-fill.failed { background: #dc3545; }
-    .progress-fill.running { background: #007bff; }
-
-    .stats-grid {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 0.75rem;
-        margin-bottom: 1rem;
-    }
-
-    .stat-item {
-        text-align: center;
-        padding: 0.5rem;
-        background: white;
-        border-radius: 6px;
-    }
-
-    .stat-value {
-        display: block;
-        font-size: 1.5rem;
-        font-weight: 600;
-    }
-
-    .stat-label {
-        font-size: 0.75rem;
-        color: #888;
-    }
-
-    .stat-item.completed .stat-value { color: #28a745; }
-    .stat-item.failed .stat-value { color: #dc3545; }
-    .stat-item.pending .stat-value { color: #666; }
-
-    .current-task {
-        background: white;
-        padding: 1rem;
-        border-radius: 6px;
-        margin-bottom: 1rem;
-    }
-
-    .current-task h4 {
-        margin: 0 0 0.5rem 0;
-        font-size: 0.9rem;
-        color: #666;
-    }
-
-    .task-name {
-        font-weight: 500;
-        margin-bottom: 0.5rem;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-
-    .task-progress {
+    .task-row {
         display: flex;
         align-items: center;
-        font-size: 0.9rem;
+        gap: 0.7rem;
+        padding: 0.5rem 0.65rem;
+        border: 1px solid var(--border-color);
+        border-left-width: 3px;
+        border-radius: var(--radius-sm);
+        background: var(--surface-3);
     }
 
-    .task-speed {
-        font-size: 0.85rem;
-        color: #666;
-        margin-top: 0.25rem;
-    }
+    .task-row.state-running { border-left-color: var(--info-color); }
+    .task-row.state-completed { border-left-color: var(--success-color); }
+    .task-row.state-failed { border-left-color: var(--danger-color); }
+    .task-row.state-cancelled, .task-row.state-skipped { border-left-color: var(--warning-color); }
 
-    .failed-tasks {
-        background: #fff5f5;
-        padding: 1rem;
-        border-radius: 6px;
-        border: 1px solid #f8d7da;
-    }
+    .row-status { flex-shrink: 0; }
+    .row-main { flex: 1; min-width: 0; }
+    .row-name { font-size: 0.88rem; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-sub { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 0.2rem; }
+    .row-error { color: var(--danger-color); font-size: 0.8rem; }
+    .row-actions { display: flex; gap: 0.35rem; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 
-    .failed-tasks h4 {
-        margin: 0 0 0.75rem 0;
-        font-size: 0.9rem;
-        color: #721c24;
-    }
-
-    .failed-item {
-        padding: 0.5rem 0;
-        border-bottom: 1px solid #f8d7da;
-    }
-
-    .failed-item:last-child {
-        border-bottom: none;
-    }
-
-    .failed-name {
-        display: block;
-        font-size: 0.9rem;
-    }
-
-    .failed-reason {
-        display: block;
-        font-size: 0.8rem;
-        color: #856404;
-        margin-top: 0.25rem;
-    }
-
-    .more-failed {
-        text-align: center;
-        font-size: 0.85rem;
-        color: #666;
-        padding-top: 0.5rem;
-    }
+    .more-btn { margin-top: 0.6rem; }
 </style>
+
+@code {
+    /// <summary>本批次的全部任务</summary>
+    [Parameter] public List<ConversionTask> Tasks { get; set; } = [];
+
+    /// <summary>是否正在处理（仅用于状态显示）</summary>
+    [Parameter] public bool IsProcessing { get; set; }
+
+    /// <summary>重试某个任务</summary>
+    [Parameter] public EventCallback<ObjectId> OnRetry { get; set; }
+
+    /// <summary>取消某个任务</summary>
+    [Parameter] public EventCallback<ObjectId> OnCancel { get; set; }
+
+    /// <summary>打开输出目录（参数为输出文件路径）</summary>
+    [Parameter] public EventCallback<string> OnOpenOutputFolder { get; set; }
+
+    private bool _showAll;
+
+    /// <summary>
+    /// 全部计数都从 <see cref="Tasks"/> 推导。
+    /// 旧实现把计数做成参数，还伪造 RunningCount = IsProcessing ? 1 : 0，
+    /// 导致数字会出现负数或与实际不符。
+    /// </summary>
+    private List<ConversionTask> VisibleTasks
+    {
+        get
+        {
+            if (_showAll) return Tasks.OrderBy(t => t.CreatedAt).ToList();
+
+            var priority = Tasks
+                .Where(t => t.Status is TaskStatus.Running or TaskStatus.Pending
+                            or TaskStatus.Failed or TaskStatus.Cancelled)
+                .ToList();
+
+            var filler = Tasks
+                .Where(t => !priority.Contains(t))
+                .OrderByDescending(t => t.CreatedAt)
+                .Take(Math.Max(0, 8 - priority.Count))
+                .ToList();
+
+            return priority.Concat(filler).OrderBy(t => t.CreatedAt).ToList();
+        }
+    }
+
+    private TimeSpan? Elapsed => Tasks.Count == 0
+        ? null
+        : Tasks.Max(t => t.CompletedAt ?? DateTime.UtcNow) - Tasks.Min(t => t.CreatedAt);
+
+    /// <summary>剩余时间：运行中任务的 ETA 最大值 + 等待中任务的粗略估算</summary>
+    private double? EtaSeconds
+    {
+        get
+        {
+            var estimates = Tasks
+                .Where(t => t.Status == TaskStatus.Running && t.EstimatedTimeRemaining is > 0)
+                .Select(t => t.EstimatedTimeRemaining!.Value)
+                .ToList();
+
+            if (estimates.Count == 0) return null;
+
+            var pending = Tasks.Count(t => t.Status == TaskStatus.Pending);
+            return estimates.Max() + pending * estimates.Average();
+        }
+    }
+
+    private void ToggleShowAll() => _showAll = !_showAll;
+
+    private async Task CopyErrorAsync(ConversionTask task)
+    {
+        var text = string.IsNullOrEmpty(task.ErrorMessage) ? "(没有错误信息)" : task.ErrorMessage;
+        var ok = await JS.InvokeAsync<bool>("ffui.copyText", text);
+
+        if (ok) Toast.Success("错误信息已复制");
+        else Toast.Error("复制失败：浏览器不允许访问剪贴板，请手动选中文本复制。");
+    }
+
+    private static string StatusIcon(TaskStatus status) => status switch
+    {
+        TaskStatus.Completed => "✅",
+        TaskStatus.Failed => "❌",
+        TaskStatus.Running => "⏳",
+        TaskStatus.Cancelled => "⏹️",
+        TaskStatus.Skipped => "⏭️",
+        _ => "⏸️"
+    };
+
+    private static string StatusText(TaskStatus status) => status switch
+    {
+        TaskStatus.Completed => "已完成",
+        TaskStatus.Failed => "失败",
+        TaskStatus.Running => "进行中",
+        TaskStatus.Cancelled => "已取消",
+        TaskStatus.Skipped => "已跳过",
+        _ => "等待中"
+    };
+
+    private static string StatusBadgeClass(TaskStatus status) => status switch
+    {
+        TaskStatus.Completed => "ffui-badge-success",
+        TaskStatus.Failed => "ffui-badge-danger",
+        TaskStatus.Running => "ffui-badge-info",
+        TaskStatus.Cancelled => "ffui-badge-warning",
+        TaskStatus.Skipped => "ffui-badge-warning",
+        _ => string.Empty
+    };
+
+    private static string RowClass(TaskStatus status) => "state-" + status.ToString().ToLowerInvariant();
+
+    private static string FormatDuration(TimeSpan? span)
+    {
+        if (span is not { } value || value.TotalSeconds <= 0) return "-";
+        return value.TotalHours >= 1
+            ? $"{(int)value.TotalHours}:{value.Minutes:D2}:{value.Seconds:D2}"
+            : $"{value.Minutes:D2}:{value.Seconds:D2}";
+    }
+
+    private static string Shorten(string text, int max) =>
+        text.Length <= max ? text : text[..max] + "…";
+}

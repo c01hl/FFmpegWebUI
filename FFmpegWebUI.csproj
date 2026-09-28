@@ -5,10 +5,75 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+
+    <!-- 版本信息：显示在界面、/api/health 与发布产物中 -->
+    <Version>2.0.0</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
+    <Product>FFmpeg WebUI</Product>
+    <AssemblyName>FFmpegWebUI</AssemblyName>
+    <RootNamespace>FFmpegWebUI</RootNamespace>
+    <Authors>FFmpegWebUI</Authors>
+    <Description>本机 FFmpeg 图形界面，支持跨平台硬件编码加速</Description>
+    <NeutralLanguage>zh-CN</NeutralLanguage>
+
+    <!-- 发布相关 -->
+    <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
+    <EnableDefaultContentItems>true</EnableDefaultContentItems>
+    <!-- Blazor 需要完整的程序集，不做裁剪（裁剪会破坏反射驱动的组件发现） -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun Condition="'$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' != ''">true</PublishReadyToRun>
+    <TieredPGO>true</TieredPGO>
+    <DebugType Condition="'$(Configuration)' == 'Release'">embedded</DebugType>
+
+    <!-- 静态资源指纹在 Release 下启用，保证浏览器缓存正确失效 -->
+    <StaticWebAssetFingerprintPattern>strict</StaticWebAssetFingerprintPattern>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="LiteDB" Version="5.0.21" />
+  </ItemGroup>
+
+  <!--
+    可选：把 FFmpeg 二进制随应用一起发布。
+    把 ffmpeg / ffprobe 放到项目根目录的 tools/ffmpeg/ 下即可，发布时会一起复制，
+    FFmpegLocator 会自动在应用目录中找到它们（用户无需自己安装 FFmpeg）。
+  -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)/tools/ffmpeg')">
+    <Content Include="tools/ffmpeg/**"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Link="ffmpeg/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!-- 发布时不需要的文件 -->
+  <ItemGroup>
+    <None Remove="docs/**" />
+    <Content Remove="docs/**" />
+    <None Remove="readmefiles/**" />
+    <Content Remove="readmefiles/**" />
+  </ItemGroup>
+
+  <!-- 让 tools/verify 能直接测试内部实现（如文件对话框的路径解析） -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="FFmpegWebUI.Verify" />
+  </ItemGroup>
+
+  <!--
+    dist/ 是本仓库的发布产物目录。它位于项目目录之内，
+    默认的 **/*.razor.js 之类的通配会把发布出来的副本当成源码再次编译，
+    所以必须显式从各类项目项里排除。
+  -->
+  <ItemGroup>
+    <Compile Remove="dist/**" />
+    <Content Remove="dist/**" />
+    <None Remove="dist/**" />
+    <EmbeddedResource Remove="dist/**" />
+    <RazorComponent Remove="dist/**" />
+    <!-- tools/verify 是独立的验证工具，有自己的入口点，不能编进 Web 应用 -->
+    <Compile Remove="tools/verify/**" />
+    <Content Remove="tools/verify/**" />
+    <None Remove="tools/verify/**" />
   </ItemGroup>
 
 </Project>

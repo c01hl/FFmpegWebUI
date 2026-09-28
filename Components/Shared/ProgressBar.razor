@@ -1,45 +1,57 @@
+@using System.Globalization
 @using FFmpegWebUI.Models
 @using TaskStatus = FFmpegWebUI.Models.TaskStatus
 
 <div class="progress-component">
     <div class="progress-header">
         <span class="progress-label">@Label</span>
-        <span class="progress-percentage">@Progress.ToString("F1")%</span>
+        <span class="progress-percentage @PercentageClass">@PercentageText%</span>
     </div>
 
-    <div class="progress-track">
-        <div class="progress-fill @GetProgressClass()" style="width: @Progress%"></div>
+    <div class="ffui-progress-track" role="progressbar"
+         aria-valuemin="0" aria-valuemax="100"
+         aria-valuenow="@PercentageText"
+         aria-valuetext="@AriaValueText"
+         aria-label="@AccessibleLabel">
+        <div class="ffui-progress-fill @FillClass" style="@FillStyle"></div>
     </div>
 
     <div class="progress-stats">
-        @if (Speed.HasValue)
-        {
-            <span class="stat-item">
-                <span class="stat-label">速度</span>
-                <span class="stat-value">@Speed.Value.ToString("F2")x</span>
-            </span>
-        }
-
-        @if (Eta.HasValue && Eta.Value > 0)
-        {
-            <span class="stat-item">
-                <span class="stat-label">剩余时间</span>
-                <span class="stat-value">@FormatTime(Eta.Value)</span>
-            </span>
-        }
-
         @if (CurrentTime > 0 && TotalDuration > 0)
         {
             <span class="stat-item">
-                <span class="stat-label">进度</span>
+                <span class="stat-label">已用/总时长</span>
                 <span class="stat-value">@FormatTime(CurrentTime) / @FormatTime(TotalDuration)</span>
             </span>
         }
+        @if (TotalDuration <= 0 && CurrentTime > 0)
+        {
+            <span class="stat-item">
+                <span class="stat-label">已用时长</span>
+                <span class="stat-value">@FormatTime(CurrentTime)</span>
+            </span>
+        }
 
-        @if (Status != null)
+        @if (HasSpeed)
+        {
+            <span class="stat-item">
+                <span class="stat-label">速度</span>
+                <span class="stat-value">@SpeedText</span>
+            </span>
+        }
+
+        @if (HasEta)
+        {
+            <span class="stat-item">
+                <span class="stat-label">剩余时间</span>
+                <span class="stat-value">@FormatTime(Eta ?? 0)</span>
+            </span>
+        }
+
+        @if (Status is not null)
         {
             <span class="stat-item status">
-                <span class="status-badge @GetStatusClass()">@GetStatusText()</span>
+                <span class="status-badge @StatusClass" title="@Status.Value">@StatusText</span>
             </span>
         }
     </div>
@@ -47,7 +59,7 @@
 
 @code {
     [Parameter]
-    public string Label { get; set; } = "转换进度";
+    public string? Label { get; set; } = "转换进度";
 
     [Parameter]
     public double Progress { get; set; }
@@ -64,103 +76,147 @@
     [Parameter]
     public double TotalDuration { get; set; }
 
+    /// <summary>任务状态。为 null 表示调用方不提供状态（例如任务列表里的进行中卡片）</summary>
     [Parameter]
     public TaskStatus? Status { get; set; }
 
-    private string GetProgressClass()
+    /// <summary>0..100，且不受服务器区域设置影响（逗号小数点会写出非法 CSS 宽度）</summary>
+    private double SafeProgress => double.IsFinite(Progress) ? Math.Clamp(Progress, 0, 100) : 0;
+
+    /// <summary>百分比文本，始终使用不变文化，避免 "85,5%" 之类的输出</summary>
+    private string PercentageText => SafeProgress.ToString("F1", CultureInfo.InvariantCulture);
+
+    private string FillStyle => $"width:{PercentageText}%";
+
+    private bool HasSpeed => Speed.HasValue && double.IsFinite(Speed.Value) && Speed.Value > 0;
+
+    private string SpeedText => HasSpeed
+        ? (Speed ?? 0).ToString("0.##", CultureInfo.InvariantCulture) + "x"
+        : string.Empty;
+
+    private bool HasEta => Eta.HasValue && double.IsFinite(Eta.Value) && Eta.Value > 0;
+
+    private string AccessibleLabel => string.IsNullOrWhiteSpace(Label) ? "转换进度" : Label;
+
+    private string AriaValueText
     {
-        if (Status == TaskStatus.Failed) return "failed";
-        if (Status == TaskStatus.Cancelled) return "cancelled";
-        if (Status == TaskStatus.Completed) return "completed";
-        if (Progress >= 100) return "completed";
-        return "running";
+        get
+        {
+            var text = $"{AccessibleLabel} {PercentageText}%";
+            if (Status is not null) text += $"，{StatusText}";
+            return text;
+        }
     }
 
-    private string GetStatusClass() => Status switch
+    /// <summary>有状态时按状态着色；没有状态时不把「100%」当成已完成（进度条自己不判断业务状态）</summary>
+    private string FillClass => Status switch
+    {
+        TaskStatus.Completed => "completed",
+        TaskStatus.Failed => "failed",
+        TaskStatus.Cancelled => "cancelled",
+        TaskStatus.Skipped => "skipped",
+        TaskStatus.Pending => "pending",
+        TaskStatus.Running => "running",
+        _ => SafeProgress > 0 ? "running" : "pending"
+    };
+
+    private string PercentageClass => Status switch
+    {
+        TaskStatus.Completed => "completed",
+        TaskStatus.Failed => "failed",
+        TaskStatus.Cancelled => "cancelled",
+        _ => string.Empty
+    };
+
+    private string StatusClass => Status switch
     {
         TaskStatus.Completed => "completed",
         TaskStatus.Failed => "failed",
         TaskStatus.Running => "running",
         TaskStatus.Cancelled => "cancelled",
+        TaskStatus.Skipped => "skipped",
+        TaskStatus.Pending => "pending",
         _ => "pending"
     };
 
-    private string GetStatusText() => Status switch
+    private string StatusText => Status switch
     {
         TaskStatus.Completed => "已完成",
         TaskStatus.Failed => "失败",
         TaskStatus.Running => "运行中",
         TaskStatus.Cancelled => "已取消",
+        TaskStatus.Skipped => "已跳过",
         TaskStatus.Pending => "等待中",
-        _ => "未知"
+        null => string.Empty,
+        _ => Status.Value.ToString()
     };
 
+    /// <summary>把秒格式化成 mm:ss 或 hh:mm:ss；用 TotalHours 才能正确显示超过 24 小时的时长</summary>
     private static string FormatTime(double seconds)
     {
-        var ts = TimeSpan.FromSeconds(seconds);
-        return ts.Hours > 0
-            ? $"{ts.Hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}"
+        // 上限取 int.MaxValue 秒（约 68 年）：既够用，又不会让 TimeSpan.FromSeconds 溢出
+        var value = double.IsFinite(seconds) ? Math.Clamp(seconds, 0, int.MaxValue) : 0;
+        var ts = TimeSpan.FromSeconds(value);
+        var hours = (int)ts.TotalHours;
+        return hours > 0
+            ? $"{hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}"
             : $"{ts.Minutes:D2}:{ts.Seconds:D2}";
     }
 }
 
 <style>
     .progress-component {
-        background: #f8f9fa;
-        border-radius: 8px;
+        background: var(--surface-3);
+        border-radius: var(--radius-md);
         padding: 1rem;
     }
 
     .progress-header {
         display: flex;
         justify-content: space-between;
+        align-items: baseline;
+        gap: 0.5rem;
         margin-bottom: 0.5rem;
     }
 
     .progress-label {
         font-weight: 500;
-        color: #333;
+        color: var(--text-primary);
     }
 
     .progress-percentage {
         font-weight: 600;
-        color: #007bff;
+        color: var(--primary-color);
     }
 
-    .progress-track {
-        height: 12px;
-        background: #e9ecef;
-        border-radius: 6px;
-        overflow: hidden;
+    .progress-percentage.completed { color: var(--success-color); }
+    .progress-percentage.failed { color: var(--danger-color); }
+    .progress-percentage.cancelled { color: var(--warning-color); }
+
+    /* .ffui-progress-track / .ffui-progress-fill 是全局类，这里只补状态配色 */
+    .progress-component .ffui-progress-track {
         margin-bottom: 0.75rem;
     }
 
-    .progress-fill {
-        height: 100%;
-        transition: width 0.3s ease;
-        border-radius: 6px;
+    .ffui-progress-fill.pending {
+        background: var(--border-strong);
     }
 
-    .progress-fill.running {
-        background: linear-gradient(90deg, #007bff, #00c853);
-        animation: shimmer 2s infinite;
+    .ffui-progress-fill.running {
+        background: var(--primary-color);
     }
 
-    .progress-fill.completed {
-        background: #28a745;
+    .ffui-progress-fill.completed {
+        background: var(--success-color);
     }
 
-    .progress-fill.failed {
-        background: #dc3545;
+    .ffui-progress-fill.failed {
+        background: var(--danger-color);
     }
 
-    .progress-fill.cancelled {
-        background: #ffc107;
-    }
-
-    @@keyframes shimmer {
-        0% { background-position: -200% 0; }
-        100% { background-position: 200% 0; }
+    .ffui-progress-fill.cancelled,
+    .ffui-progress-fill.skipped {
+        background: var(--warning-color);
     }
 
     .progress-stats {
@@ -177,14 +233,14 @@
 
     .stat-label {
         font-size: 0.75rem;
-        color: #888;
-        text-transform: uppercase;
+        color: var(--text-muted);
     }
 
     .stat-value {
         font-size: 0.95rem;
         font-weight: 500;
-        color: #333;
+        color: var(--text-primary);
+        font-family: var(--font-mono);
     }
 
     .stat-item.status {
@@ -193,14 +249,15 @@
 
     .status-badge {
         padding: 0.25rem 0.75rem;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         font-size: 0.85rem;
         font-weight: 500;
     }
 
-    .status-badge.completed { background: #d4edda; color: #155724; }
-    .status-badge.failed { background: #f8d7da; color: #721c24; }
-    .status-badge.running { background: #cce5ff; color: #004085; }
-    .status-badge.cancelled { background: #fff3cd; color: #856404; }
-    .status-badge.pending { background: #e9ecef; color: #666; }
+    .status-badge.completed { background: var(--success-bg); color: var(--success-text); }
+    .status-badge.failed { background: var(--danger-bg); color: var(--danger-text); }
+    .status-badge.running { background: var(--info-bg); color: var(--info-text); }
+    .status-badge.cancelled { background: var(--warning-bg); color: var(--warning-text); }
+    .status-badge.skipped { background: var(--surface-2); color: var(--text-muted); }
+    .status-badge.pending { background: var(--surface-2); color: var(--text-secondary); }
 </style>

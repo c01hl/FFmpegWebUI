@@ -1,81 +1,167 @@
 @using FFmpegWebUI.Models
+@using FFmpegWebUI.Services
 
-<div class="encoder-card @(Encoder.IsAvailable ? "available" : "unavailable")">
-    <div class="encoder-header">
-        <span class="encoder-icon">@GetEncoderIcon()</span>
-        <span class="encoder-name">@Encoder.DisplayName</span>
-    </div>
-    <div class="encoder-details">
-        <span class="encoder-type">@GetEncoderTypeLabel()</span>
-        <span class="encoder-status">
-            @if (Encoder.IsAvailable)
-            {
-                <span class="status-badge available">✓ 可用</span>
-            }
-            else
-            {
-                <span class="status-badge unavailable">✗ 不可用</span>
-            }
-        </span>
-    </div>
-    @if (!Encoder.IsAvailable && !string.IsNullOrEmpty(Encoder.UnavailableReason))
-    {
-        <div class="encoder-reason">@Encoder.UnavailableReason</div>
-    }
-    @if (Encoder.SupportedCodecs.Count > 0)
-    {
-        <div class="encoder-codecs">
-            @foreach (var codec in Encoder.SupportedCodecs)
-            {
-                <span class="codec-tag">@codec</span>
-            }
+@if (Encoder is null)
+{
+    @* 预渲染/参数尚未就绪时也要能安全渲染 *@
+    <div class="encoder-card unavailable">
+        <div class="encoder-header">
+            <span class="encoder-name">编码器信息不可用</span>
         </div>
-    }
-</div>
+    </div>
+}
+else
+{
+    <div class="encoder-card @(Encoder.IsAvailable ? "available" : "unavailable")">
+        <div class="encoder-header">
+            <span class="encoder-icon" aria-hidden="true">@EncoderIcon</span>
+            <span class="encoder-name">@Encoder.DisplayName</span>
+            <span class="ffui-badge @AvailabilityBadgeClass" aria-label="@AvailabilityLabel">
+                <span aria-hidden="true">@(Encoder.IsAvailable ? "✓" : "✗")</span>@(Encoder.IsAvailable ? "可用" : "不可用")
+            </span>
+        </div>
+
+        <div class="encoder-details">
+            @* Name 要和模板里的 RequiredEncoder 匹配，必须显式展示 *@
+            <code class="encoder-id" title="模板 RequiredEncoder 需要填写这个名称">@Encoder.Name</code>
+            <span class="encoder-family" title="@Encoder.Family">@FamilyName</span>
+        </div>
+
+        <div class="encoder-tags">
+            @if (!string.IsNullOrWhiteSpace(Encoder.Codec))
+            {
+                <span class="ffui-badge ffui-badge-info" title="编码格式">@Encoder.Codec</span>
+            }
+            <span class="ffui-badge" title="@(Encoder.IsHardware ? "硬件编码器" : "软件编码器")">
+                @(Encoder.IsHardware ? "硬件编码" : "软件编码")
+            </span>
+        </div>
+
+        @if (!Encoder.IsAvailable)
+        {
+            @if (Encoder.MissingFromBuild)
+            {
+                <div class="encoder-reason ffui-alert ffui-alert-warning">当前 FFmpeg 构建未包含该编码器</div>
+
+                @if (!string.IsNullOrWhiteSpace(Encoder.UnavailableReason))
+                {
+                    <div class="encoder-detail">@Encoder.UnavailableReason</div>
+                }
+
+                @if (Encoder.IsHardware && !string.IsNullOrWhiteSpace(PlatformHint))
+                {
+                    <div class="encoder-hint ffui-alert ffui-alert-info">@PlatformHint</div>
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(Encoder.UnavailableReason))
+            {
+                <div class="encoder-reason ffui-alert ffui-alert-warning">@Encoder.UnavailableReason</div>
+            }
+        }
+        else if (!Encoder.SupportsQualityOptions)
+        {
+            <div class="encoder-quality">
+                <span class="ffui-badge ffui-badge-warning">该编码器在当前 FFmpeg 版本下只能使用最简参数</span>
+            </div>
+        }
+
+        @{
+            var codecList = Codecs;
+        }
+        @if (codecList.Count > 0)
+        {
+            <div class="encoder-codecs">
+                @foreach (var (codec, index) in codecList.Select((c, i) => (c, i)))
+                {
+                    <span class="codec-tag" @key="index">@codec</span>
+                }
+            </div>
+        }
+    </div>
+}
 
 @code {
     [Parameter, EditorRequired]
     public HardwareEncoder Encoder { get; set; } = default!;
 
-    private string GetEncoderIcon() => Encoder.Type switch
+    private List<string> Codecs => Encoder?.SupportedCodecs is { Count: > 0 } list
+        ? list.Where(c => !string.IsNullOrWhiteSpace(c)).ToList()
+        : new List<string>();
+
+    private string EncoderIcon => Encoder?.Type switch
     {
         EncoderType.Nvenc => "🟢",
         EncoderType.Qsv => "🔵",
         EncoderType.Amf => "🔴",
         EncoderType.VideoToolbox => "⚪",
+        EncoderType.Vaapi => "🟣",
+        EncoderType.Vulkan => "🟠",
+        EncoderType.MediaFoundation => "🟡",
         EncoderType.Software => "💻",
         _ => "❓"
     };
 
-    private string GetEncoderTypeLabel() => Encoder.Type switch
+    /// <summary>族显示名（如 NVIDIA NVENC / Apple VideoToolbox）</summary>
+    private string FamilyName
     {
-        EncoderType.Nvenc => "NVIDIA",
-        EncoderType.Qsv => "Intel",
-        EncoderType.Amf => "AMD",
-        EncoderType.VideoToolbox => "Apple",
-        EncoderType.Software => "CPU",
-        _ => "未知"
-    };
+        get
+        {
+            var family = Encoder?.Family;
+            if (string.IsNullOrWhiteSpace(family)) return "未知族";
+            return EncoderCatalog.FamilyDisplayName(family);
+        }
+    }
+
+    private string AvailabilityBadgeClass =>
+        Encoder.IsAvailable ? "ffui-badge-success" : "ffui-badge-danger";
+
+    private string AvailabilityLabel =>
+        Encoder.IsAvailable ? "状态：可用" : "状态：不可用";
+
+    /// <summary>MissingFromBuild 时按平台给出的可操作提示</summary>
+    private string? PlatformHint
+    {
+        get
+        {
+            if (AppPaths.IsWindows)
+            {
+                return "Windows：请安装显卡驱动，并使用带 nvenc / qsv / amf 的 FFmpeg 构建。";
+            }
+
+            if (AppPaths.IsMacOS)
+            {
+                return "macOS：仅 VideoToolbox 可用，请使用带 videotoolbox 的 FFmpeg 构建。";
+            }
+
+            if (AppPaths.IsLinux)
+            {
+                return "Linux：需要 /dev/dri 设备与 VA-API 驱动（如 intel-media-driver / mesa-va-drivers）。";
+            }
+
+            return "请改用带该编码器的 FFmpeg 构建。";
+        }
+    }
 }
 
 <style>
     .encoder-card {
-        border: 1px solid #ddd;
-        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
         padding: 1rem;
         margin: 0.5rem;
         min-width: 250px;
-        background: white;
-        transition: box-shadow 0.2s;
+        background: var(--card-bg);
+        color: var(--text-primary);
+        transition: box-shadow 0.2s, background 0.2s;
     }
 
     .encoder-card:hover {
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        box-shadow: var(--shadow-md);
     }
 
     .encoder-card.unavailable {
-        opacity: 0.6;
-        background: #f9f9f9;
+        opacity: 0.75;
+        background: var(--surface-3);
     }
 
     .encoder-header {
@@ -83,49 +169,70 @@
         align-items: center;
         gap: 0.5rem;
         margin-bottom: 0.5rem;
+        flex-wrap: wrap;
     }
 
     .encoder-icon {
-        font-size: 1.2rem;
+        font-size: 1.1rem;
+        line-height: 1;
     }
 
     .encoder-name {
         font-weight: 600;
         font-size: 0.95rem;
+        color: var(--text-primary);
     }
 
     .encoder-details {
         display: flex;
         justify-content: space-between;
         align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
         font-size: 0.85rem;
-        color: #666;
+        color: var(--text-secondary);
     }
 
-    .status-badge {
-        padding: 0.2rem 0.5rem;
-        border-radius: 4px;
-        font-size: 0.75rem;
-        font-weight: 500;
+    .encoder-id {
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        background: var(--code-bg);
+        color: var(--text-primary);
+        padding: 0.1rem 0.35rem;
+        border-radius: var(--radius-sm);
+        word-break: break-all;
     }
 
-    .status-badge.available {
-        background: #d4edda;
-        color: #155724;
+    .encoder-family {
+        color: var(--text-muted);
     }
 
-    .status-badge.unavailable {
-        background: #f8d7da;
-        color: #721c24;
+    .encoder-tags {
+        display: flex;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+        margin-top: 0.5rem;
     }
 
     .encoder-reason {
-        font-size: 0.8rem;
-        color: #856404;
-        background: #fff3cd;
-        padding: 0.25rem 0.5rem;
-        border-radius: 4px;
+        margin-top: 0.6rem;
+        font-size: 0.82rem;
+    }
+
+    .encoder-detail {
+        margin-top: 0.35rem;
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        word-break: break-word;
+    }
+
+    .encoder-hint {
         margin-top: 0.5rem;
+        font-size: 0.8rem;
+    }
+
+    .encoder-quality {
+        margin-top: 0.6rem;
     }
 
     .encoder-codecs {
@@ -136,10 +243,12 @@
     }
 
     .codec-tag {
-        background: #e9ecef;
+        background: var(--surface-3);
+        border: 1px solid var(--border-color);
         padding: 0.1rem 0.4rem;
-        border-radius: 3px;
+        border-radius: var(--radius-sm);
         font-size: 0.75rem;
-        color: #495057;
+        color: var(--text-secondary);
+        font-family: var(--font-mono);
     }
 </style>

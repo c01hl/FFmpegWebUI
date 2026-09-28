@@ -1,0 +1,164 @@
+@*
+    根据模板声明的 Parameters 自动生成输入控件。
+    Convert / 批量处理 / 模板详情 都用它，保证「模板能调什么」在任何入口都一致。
+*@
+
+@if (Template != null && VisibleParameters.Count > 0)
+{
+    <div class="param-grid">
+        @foreach (var parameter in VisibleParameters)
+        {
+            var value = GetValue(parameter);
+
+            <div class="param-item" @key="parameter.Name">
+                <label class="param-label" for="@Id(parameter)">
+                    @parameter.Label
+                    @if (parameter.Kind == TemplateParameterKind.Number && (parameter.Min.HasValue || parameter.Max.HasValue))
+                    {
+                        <span class="param-range">
+                            (@(parameter.Min?.ToString("0.##") ?? "—") ~ @(parameter.Max?.ToString("0.##") ?? "∞"))
+                        </span>
+                    }
+                </label>
+
+                @switch (parameter.Kind)
+                {
+                    case TemplateParameterKind.Select:
+                        <select id="@Id(parameter)" class="param-input"
+                                value="@value" disabled="@Disabled"
+                                @onchange="e => SetValue(parameter, e.Value)">
+                            @foreach (var option in parameter.Options)
+                            {
+                                <option value="@option.Value" title="@option.Description">@option.Label</option>
+                            }
+                        </select>
+                        if (!string.IsNullOrEmpty(ResolveOptionDescription(parameter, value)))
+                        {
+                            <span class="param-help">@ResolveOptionDescription(parameter, value)</span>
+                        }
+                        break;
+
+                    case TemplateParameterKind.Number:
+                        <input id="@Id(parameter)" class="param-input" type="number"
+                               value="@value" disabled="@Disabled"
+                               min="@parameter.Min" max="@parameter.Max" step="any"
+                               @oninput="e => SetValue(parameter, e.Value)" />
+                        break;
+
+                    case TemplateParameterKind.Boolean:
+                        <label class="param-switch">
+                            <input type="checkbox" disabled="@Disabled"
+                                   checked="@IsBooleanTrue(parameter, value)"
+                                   @onchange="e => SetValue(parameter, e.Value is true ? parameter.TrueValue : parameter.FalseValue)" />                            <span>@(IsBooleanTrue(parameter, value) ? "已启用" : "已关闭")</span>
+                        </label>
+                        break;
+
+                    default:
+                        <input id="@Id(parameter)" class="param-input" type="text"
+                               value="@value" disabled="@Disabled"
+                               placeholder="@parameter.DefaultValue"
+                               @oninput="e => SetValue(parameter, e.Value)" />
+                        break;
+                }
+
+                @if (parameter.Kind != TemplateParameterKind.Select && !string.IsNullOrEmpty(parameter.Description))
+                {
+                    <span class="param-help">@parameter.Description</span>
+                }
+            </div>
+        }
+    </div>
+}
+
+<style>
+    .param-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 0.85rem;
+    }
+
+    .param-item { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+
+    .param-label {
+        font-size: 0.85rem;
+        font-weight: 500;
+        color: var(--text-secondary);
+        display: flex;
+        align-items: baseline;
+        gap: 0.35rem;
+    }
+
+    .param-range { font-size: 0.75rem; color: var(--text-muted); font-weight: 400; }
+
+    .param-input {
+        background: var(--input-bg);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        padding: 0.42rem 0.55rem;
+        font-size: 0.9rem;
+        font-family: inherit;
+        width: 100%;
+        box-sizing: border-box;
+    }
+
+    .param-help { font-size: 0.75rem; color: var(--text-muted); }
+
+    .param-switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.88rem;
+        color: var(--text-secondary);
+    }
+</style>
+
+@code {
+    /// <summary>要渲染参数的模板</summary>
+    [Parameter] public CommandTemplate? Template { get; set; }
+
+    /// <summary>当前参数值（双向绑定）</summary>
+    [Parameter] public Dictionary<string, string> Values { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>参数值变化回调</summary>
+    [Parameter] public EventCallback<Dictionary<string, string>> ValuesChanged { get; set; }
+
+    /// <summary>是否禁用交互</summary>
+    [Parameter] public bool Disabled { get; set; }
+
+    private List<TemplateParameter> VisibleParameters =>
+        Template?.Parameters.Where(p => !string.IsNullOrWhiteSpace(p.Name)).ToList() ?? [];
+
+    private string GetValue(TemplateParameter parameter)
+    {
+        if (Values.TryGetValue(parameter.Name, out var value)) return value ?? string.Empty;
+        return parameter.DefaultValue ?? string.Empty;
+    }
+
+    private bool IsBooleanTrue(TemplateParameter parameter, string value)
+    {
+        if (string.IsNullOrEmpty(value)) return false;
+        return string.Equals(value, parameter.TrueValue, StringComparison.OrdinalIgnoreCase)
+               || value is "1" or "true" or "True" or "yes" or "on";
+    }
+
+    private static string? ResolveOptionDescription(TemplateParameter parameter, string value) =>
+        parameter.Kind == TemplateParameterKind.Select
+            ? parameter.Options.FirstOrDefault(o => string.Equals(o.Value, value, StringComparison.Ordinal))?.Description
+            : null;
+
+    private static string Id(TemplateParameter parameter) =>
+        $"param-{parameter.Name}".Replace(' ', '_');
+
+    private async Task SetValue(TemplateParameter parameter, object? rawValue)
+    {
+        // 不改调用方传入的字典实例，否则父组件的参数变更可能被忽略
+        var next = new Dictionary<string, string>(Values, StringComparer.OrdinalIgnoreCase)
+        {
+            [parameter.Name] = rawValue?.ToString() ?? string.Empty
+        };
+
+        Values = next;
+        await ValuesChanged.InvokeAsync(next);
+    }
+}

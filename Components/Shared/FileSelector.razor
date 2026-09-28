@@ -1,34 +1,70 @@
 @using FFmpegWebUI.Services
 @inject IFileService FileService
+@inject IFileDialogService DialogService
+@inject IToastService Toast
+@implements IDisposable
 
+@*
+    拖放说明：浏览器出于安全限制只暴露被拖入文件的名称（File.name），拿不到绝对路径；
+    原实现里的 @ondrop 是空方法、也没有 @ondrop:preventDefault，拖放会让浏览器直接导航并
+    丢掉页面状态。因此这里移除了拖放能力与「拖拽文件到此处」的提示文案，只保留
+    输入框 + 系统文件对话框两条路径。
+*@
 <div class="file-selector">
-    <label class="file-label">@Label</label>
+    <label class="file-label" for="@_inputId">@Label</label>
+
     <div class="input-group">
-        <input type="text" 
-               class="file-input @(IsValid ? "" : "invalid")"
-               value="@Value"
+        <input id="@_inputId"
+               type="text"
+               class="file-input @(_error is null ? null : "invalid")"
+               value="@_text"
                placeholder="@Placeholder"
+               disabled="@Disabled"
+               spellcheck="false"
+               autocomplete="off"
+               aria-invalid="@(_error is null ? null : "true")"
+               aria-describedby="@DescribedBy"
                @oninput="OnInputChanged"
-               @ondragover="OnDragOver"
-               @ondrop="OnDrop" />
+               @onchange="OnChangeCommitted" />
+
         @if (ShowBrowse)
         {
-            <button type="button" class="browse-btn" @onclick="OnBrowseClick">
-                📂 浏览
+            <button type="button"
+                    class="ffui-btn ffui-btn-primary browse-btn"
+                    disabled="@(Disabled || _isBrowsing)"
+                    aria-label="@BrowseLabel"
+                    aria-busy="@(_isBrowsing ? "true" : null)"
+                    @onclick="OnBrowseClick">
+                @if (_isBrowsing)
+                {
+                    <span class="spinner" aria-hidden="true"></span>
+                }
+                else
+                {
+                    <span aria-hidden="true">📂</span>
+                }
+                <span>浏览</span>
             </button>
         }
     </div>
-    @if (!string.IsNullOrEmpty(ErrorMessage))
+
+    @if (_error is not null)
     {
-        <span class="error-message">@ErrorMessage</span>
+        <span class="error-message" id="@_errorId">
+            <span aria-hidden="true">⚠️</span> @_error
+        </span>
     }
-    @if (!string.IsNullOrEmpty(Value) && ShowFileInfo && _fileSize > 0)
+
+    @if (!IsDirectory && ShowFileInfo && _fileExists && !string.IsNullOrEmpty(_text))
     {
-        <span class="file-info">文件大小: @FormatFileSize(_fileSize)</span>
+        <span class="file-info" id="@_infoId">文件大小: @FileService.FormatFileSize(_fileSize)</span>
     }
 </div>
 
 @code {
+    /// <summary>输入防抖时长（毫秒）：避免每敲一个键都回调父组件</summary>
+    private const int InputDebounceMs = 350;
+
     [Parameter]
     public string Label { get; set; } = "文件路径";
 
@@ -38,8 +74,9 @@
     [Parameter]
     public EventCallback<string> ValueChanged { get; set; }
 
+    /// <summary>占位提示。不再宣传拖放：浏览器拿不到拖入文件的绝对路径。</summary>
     [Parameter]
-    public string Placeholder { get; set; } = "输入文件路径或拖拽文件到此处";
+    public string Placeholder { get; set; } = "输入文件路径，或点击「浏览」选择";
 
     [Parameter]
     public bool ShowBrowse { get; set; } = true;
@@ -56,126 +93,278 @@
     [Parameter]
     public bool IsDirectory { get; set; }
 
-    private bool IsValid => string.IsNullOrEmpty(ErrorMessage);
-    private string? ErrorMessage;
+    [Parameter]
+    public bool Disabled { get; set; }
+
+    private readonly string _uid = Guid.NewGuid().ToString("N")[..8];
+
+    /// <summary>输入框当前的显示文本（用户正在输入时以它为准，不回写 Value）</summary>
+    private string _text = string.Empty;
+
+    /// <summary>父组件当前持有的值（用于区分「外部改值」与「用户正在输入」）</summary>
+    private string _syncedValue = string.Empty;
+
+    private string? _error;
     private long _fileSize;
+    private bool _fileExists;
+    private bool _isBrowsing;
+    private bool _disposed;
+    private CancellationTokenSource? _debounceCts;
+
+    private string _inputId => $"ffui-file-{_uid}-input";
+    private string _errorId => $"ffui-file-{_uid}-error";
+    private string _infoId => $"ffui-file-{_uid}-info";
+
+    private string BrowseLabel => IsDirectory ? $"浏览并选择{Label}（文件夹）" : $"浏览并选择{Label}（文件）";
+
+    private string? DescribedBy
+    {
+        get
+        {
+            var ids = new List<string>(2);
+            if (_error is not null) ids.Add(_errorId);
+            if (!IsDirectory && ShowFileInfo && _fileExists && !string.IsNullOrEmpty(_text)) ids.Add(_infoId);
+            return ids.Count > 0 ? string.Join(' ', ids) : null;
+        }
+    }
 
     protected override void OnParametersSet()
     {
+        // 只有父组件持有的值真的变化时（首次赋值 / 外部修改）才覆盖本地文本；
+        // 用户输入过程中的中间状态不会被父组件的重新渲染改写。
+        var incoming = Value ?? string.Empty;
+        if (!string.Equals(incoming, _syncedValue, StringComparison.Ordinal))
+        {
+            _syncedValue = incoming;
+            _text = incoming;
+        }
+
         Validate();
     }
 
     private async Task OnInputChanged(ChangeEventArgs e)
     {
-        var newValue = e.Value?.ToString() ?? string.Empty;
-        await UpdateValue(newValue);
+        if (Disabled) return;
+
+        _text = e.Value?.ToString() ?? string.Empty;
+        Validate(); // 校验即时反馈，防抖只作用于对父组件的回调
+
+        var cts = new CancellationTokenSource();
+        var previous = _debounceCts;
+        _debounceCts = cts;
+        previous?.Cancel();
+
+        try
+        {
+            await Task.Delay(InputDebounceMs, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // 用户还在继续输入，本次已被更新的输入取代：不是错误，无需提示
+            return;
+        }
+
+        if (_disposed || !ReferenceEquals(_debounceCts, cts)) return;
+
+        cts.Dispose();
+        _debounceCts = null;
+        await CommitAsync();
     }
 
-    private async Task UpdateValue(string newValue)
+    /// <summary>失焦/回车提交：立即回调，不再等待防抖</summary>
+    private async Task OnChangeCommitted(ChangeEventArgs e)
     {
-        Value = newValue.Trim().Trim('"');
+        if (Disabled) return;
+
+        _text = e.Value?.ToString() ?? string.Empty;
         Validate();
-        await ValueChanged.InvokeAsync(Value);
+        CancelPendingDebounce();
+        await CommitAsync();
+    }
+
+    private void CancelPendingDebounce()
+    {
+        _debounceCts?.Cancel();
+        _debounceCts = null;
+    }
+
+    private async Task CommitAsync()
+    {
+        var normalized = Normalize(_text);
+
+        try
+        {
+            await ValueChanged.InvokeAsync(normalized);
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"路径未能保存：{ex.Message}");
+        }
+    }
+
+    private static string Normalize(string? text)
+    {
+        var value = (text ?? string.Empty).Trim();
+        // 支持从资源管理器「复制为路径」得到的带引号路径
+        if (value.Length >= 2 && value.StartsWith('"') && value.EndsWith('"'))
+        {
+            value = value[1..^1].Trim();
+        }
+        return value;
     }
 
     private void Validate()
     {
-        ErrorMessage = null;
+        _error = null;
         _fileSize = 0;
+        _fileExists = false;
 
-        if (string.IsNullOrEmpty(Value))
-        {
-            return;
-        }
+        if (string.IsNullOrWhiteSpace(_text)) return;
 
-        if (ValidateExists)
+        // 展开 ~ 并规整为绝对路径，仅用于校验/打开对话框，绝不回写用户输入
+        var path = AppPaths.ToAbsolute(_text);
+
+        try
         {
-            if (IsDirectory)
+            if (ValidateExists)
             {
-                if (!Directory.Exists(Value))
+                if (IsDirectory)
                 {
-                    ErrorMessage = "目录不存在";
-                    return;
+                    if (!Directory.Exists(path)) _error = "目录不存在";
+                }
+                else if (!FileService.IsFileAccessible(path))
+                {
+                    _error = "文件不存在或无法访问";
                 }
             }
-            else
-            {
-                if (!FileService.IsFileAccessible(Value))
-                {
-                    ErrorMessage = "文件不存在或无法访问";
-                    return;
-                }
 
-                _fileSize = FileService.GetFileSize(Value);
+            // 文件大小与「是否存在」校验相互独立：ValidateExists=false 时也要能显示
+            if (!IsDirectory && ShowFileInfo)
+            {
+                _fileSize = FileService.GetFileSize(path);
+                _fileExists = _fileSize > 0 || File.Exists(path);
             }
         }
-
-        if (AllowedExtensions != null && AllowedExtensions.Count > 0 && !IsDirectory)
+        catch (Exception ex)
         {
-            var ext = Path.GetExtension(Value).TrimStart('.').ToLower();
-            if (!AllowedExtensions.Contains(ext))
+            // 探测过程本身出错也要让用户看到原因，不能静默
+            _error = $"路径无法读取：{ex.Message}";
+        }
+
+        if (IsDirectory || AllowedExtensions is not { Count: > 0 }) return;
+
+        try
+        {
+            var extension = Path.GetExtension(path);
+            if (!string.IsNullOrEmpty(extension) &&
+                _error is null &&
+                !AllowedExtensionSet().Contains(extension.TrimStart('.')))
             {
-                ErrorMessage = $"不支持的文件格式，允许: {string.Join(", ", AllowedExtensions)}";
+                _error = $"不支持的文件格式，允许: {string.Join(", ", AllowedExtensions)}";
             }
+        }
+        catch (Exception ex)
+        {
+            // Path.GetExtension 对含非法字符的路径会抛异常，这里给出可见提示而不是让渲染崩掉
+            _error ??= $"路径格式无法识别：{ex.Message}";
         }
     }
 
-    private void OnDragOver(DragEventArgs e)
+    /// <summary>允许的扩展名集合：大小写不敏感，并去掉前导点</summary>
+    private HashSet<string> AllowedExtensionSet()
     {
-        e.DataTransfer.DropEffect = "copy";
-    }
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (AllowedExtensions is null) return set;
 
-    private async Task OnDrop(DragEventArgs e)
-    {
-        // 注意: Blazor Server 不支持直接获取拖拽的文件路径
-        // 用户需要手动粘贴路径
+        foreach (var item in AllowedExtensions)
+        {
+            if (string.IsNullOrWhiteSpace(item)) continue;
+            set.Add(item.Trim().TrimStart('.'));
+        }
+        return set;
     }
 
     private async Task OnBrowseClick()
     {
-        string? selectedPath;
-        
-        if (IsDirectory)
+        if (Disabled || _isBrowsing) return; // 双击不会弹出两个对话框
+
+        if (!DialogService.IsSupported)
         {
-            selectedPath = await FileService.OpenFolderDialogAsync(
-                title: $"选择{Label}",
-                initialDirectory: string.IsNullOrEmpty(Value) ? null : Value
-            );
+            Toast.Warning($"当前环境不支持系统文件对话框（{DialogService.BackendDescription}），请在输入框中手动粘贴路径。");
+            return;
         }
-        else
+
+        _isBrowsing = true;
+        try
         {
-            // 构建文件过滤器
-            string? filter = null;
-            if (AllowedExtensions != null && AllowedExtensions.Count > 0)
+            var title = $"选择{Label}";
+            var initialDirectory = ResolveInitialDirectory();
+
+            string? selected = IsDirectory
+                ? await DialogService.PickFolderAsync(title, initialDirectory)
+                : await DialogService.PickFileAsync(title, BuildFilter(), initialDirectory);
+
+            if (string.IsNullOrWhiteSpace(selected))
             {
-                var extPattern = string.Join(";", AllowedExtensions.Select(e => $"*.{e.TrimStart('.')}"));
-                filter = $"允许的文件|{extPattern}|所有文件|*.*";
+                // null 既可能是用户取消，也可能是对话框后端不可用 —— 两种情况都必须有可见反馈
+                Toast.Warning($"没有选择{(IsDirectory ? "文件夹" : "文件")}：可能已取消，或系统对话框（{DialogService.BackendDescription}）不可用。可直接把路径粘贴到输入框。");
+                return;
             }
-            
-            selectedPath = await FileService.OpenFileDialogAsync(
-                title: $"选择{Label}",
-                filter: filter,
-                initialDirectory: string.IsNullOrEmpty(Value) ? null : Path.GetDirectoryName(Value)
-            );
+
+            _text = selected.Trim();
+            Validate();
+            await CommitAsync();
         }
-        
-        if (!string.IsNullOrEmpty(selectedPath))
+        catch (Exception ex)
         {
-            await UpdateValue(selectedPath);
+            Toast.Error($"打开文件对话框失败：{ex.Message}（对话框后端：{DialogService.BackendDescription}）。可直接把路径粘贴到输入框。");
+        }
+        finally
+        {
+            _isBrowsing = false;
         }
     }
 
-    private static string FormatFileSize(long bytes)
+    private string? ResolveInitialDirectory()
     {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        int order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
+        var current = Normalize(_text);
+        if (string.IsNullOrWhiteSpace(current)) return null;
+
+        var absolute = AppPaths.ToAbsolute(current);
+        if (IsDirectory && Directory.Exists(absolute)) return absolute;
+
+        try
         {
-            order++;
-            size /= 1024;
+            return Path.GetDirectoryName(absolute);
         }
-        return $"{size:0.##} {sizes[order]}";
+        catch (Exception ex)
+        {
+            Toast.Warning($"无法识别当前路径所在目录，将使用默认目录：{ex.Message}");
+            return null;
+        }
+    }
+
+    private string? BuildFilter()
+    {
+        if (AllowedExtensions is not { Count: > 0 }) return null;
+
+        var patterns = AllowedExtensions
+            .Where(e => !string.IsNullOrWhiteSpace(e))
+            .Select(e => "*." + e.Trim().TrimStart('.'))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return patterns.Count == 0 ? null : $"允许的文件|{string.Join(";", patterns)}|所有文件|*.*";
+    }
+
+    public void Dispose()
+    {
+        _disposed = true;
+        var cts = _debounceCts;
+        _debounceCts = null;
+        if (cts is null) return;
+        cts.Cancel();
+        cts.Dispose();
     }
 }
 
@@ -188,58 +377,46 @@
         display: block;
         font-weight: 500;
         margin-bottom: 0.5rem;
-        color: #333;
+        color: var(--text-primary);
     }
 
     .input-group {
         display: flex;
         gap: 0.5rem;
+        align-items: stretch;
     }
 
     .file-input {
-        flex: 1;
-        padding: 0.75rem;
-        border: 2px solid #ddd;
-        border-radius: 6px;
-        font-size: 0.95rem;
-        transition: border-color 0.2s;
-    }
-
-    .file-input:focus {
-        outline: none;
-        border-color: #007bff;
+        flex: 1 1 auto;
+        min-width: 0;
+        font-family: var(--font-mono);
+        font-size: 0.9rem;
     }
 
     .file-input.invalid {
-        border-color: #dc3545;
+        border-color: var(--danger-color);
+    }
+
+    .file-input.invalid:focus {
+        border-color: var(--danger-color);
+        box-shadow: 0 0 0 3px var(--danger-bg);
     }
 
     .browse-btn {
-        padding: 0.75rem 1rem;
-        border: 2px solid #007bff;
-        border-radius: 6px;
-        background: #007bff;
-        color: white;
-        font-size: 0.95rem;
-        cursor: pointer;
+        flex: 0 0 auto;
         white-space: nowrap;
-        transition: background 0.2s;
-    }
-
-    .browse-btn:hover {
-        background: #0056b3;
     }
 
     .error-message {
         display: block;
-        color: #dc3545;
+        color: var(--danger-color);
         font-size: 0.85rem;
         margin-top: 0.25rem;
     }
 
     .file-info {
         display: block;
-        color: #666;
+        color: var(--text-muted);
         font-size: 0.85rem;
         margin-top: 0.25rem;
     }

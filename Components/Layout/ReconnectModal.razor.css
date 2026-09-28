@@ -3,6 +3,7 @@
 .components-reconnect-failed-visible,
 .components-pause-visible,
 .components-resume-failed-visible,
+.components-reconnect-hint,
 .components-rejoining-animation {
     display: none;
 }
@@ -15,19 +16,24 @@
 #components-reconnect-modal.components-reconnect-retrying .components-reconnect-repeated-attempt-visible,
 #components-reconnect-modal.components-reconnect-retrying .components-rejoining-animation,
 #components-reconnect-modal.components-reconnect-failed,
-#components-reconnect-modal.components-reconnect-failed .components-reconnect-failed-visible {
+#components-reconnect-modal.components-reconnect-failed .components-reconnect-failed-visible,
+#components-reconnect-modal.components-reconnect-show .components-reconnect-hint,
+#components-reconnect-modal.components-reconnect-retrying .components-reconnect-hint,
+#components-reconnect-modal.components-reconnect-paused .components-reconnect-hint,
+#components-reconnect-modal.components-reconnect-resume-failed .components-reconnect-hint {
     display: block;
 }
 
 
 #components-reconnect-modal {
-    background-color: white;
+    background-color: var(--card-bg);
+    color: var(--text-primary);
     width: 20rem;
     margin: 20vh auto;
     padding: 2rem;
     border: 0;
     border-radius: 0.5rem;
-    box-shadow: 0 3px 6px 2px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-lg);
     opacity: 0;
     transition: display 0.5s allow-discrete, overlay 0.5s allow-discrete;
     animation: components-reconnect-modal-fadeOutOpacity 0.5s both;
@@ -41,7 +47,7 @@
 }
 
 #components-reconnect-modal::backdrop {
-    background-color: rgba(0, 0, 0, 0.4);
+    background-color: var(--overlay-bg);
     animation: components-reconnect-modal-fadeInOpacity 0.5s ease-in-out;
     opacity: 1;
 }
@@ -89,19 +95,23 @@
 }
 
 #components-reconnect-modal button {
-    border: 0;
-    background-color: #6b9ed2;
-    color: white;
-    padding: 4px 24px;
-    border-radius: 4px;
+    border: 1px solid var(--primary-color);
+    background-color: var(--primary-color);
+    color: var(--primary-contrast);
+    padding: 6px 24px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 0.95rem;
 }
 
     #components-reconnect-modal button:hover {
-        background-color: #3b6ea2;
+        background-color: var(--primary-dark);
+        border-color: var(--primary-dark);
     }
 
-    #components-reconnect-modal button:active {
-        background-color: #6b9ed2;
+    #components-reconnect-modal button:focus-visible {
+        outline: 2px solid var(--primary-color);
+        outline-offset: 2px;
     }
 
 .components-rejoining-animation {
@@ -112,7 +122,7 @@
 
     .components-rejoining-animation div {
         position: absolute;
-        border: 3px solid #0087ff;
+        border: 3px solid var(--primary-color);
         opacity: 1;
         border-radius: 50%;
         animation: components-rejoining-animation 1.5s cubic-bezier(0, 0.2, 0.8, 1) infinite;
@@ -154,4 +164,10 @@
         height: 80px;
         opacity: 0;
     }
+}
+
+.components-reconnect-hint {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 0.5rem;
 }

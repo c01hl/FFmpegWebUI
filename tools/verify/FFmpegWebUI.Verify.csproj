@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    离线验证工具（不参与主项目构建，也不需要发布）。
+    用途：在不打开界面的前提下，验证「FFmpeg 定位 / 能力探测 / 硬件检测 /
+    模板能否真正执行 / 转换队列」这一整条链路。
+
+    用法：在仓库根目录执行 dotnet run 并指向本目录。
+      不带参数    检查全部
+      pipeline    只检查转换管线
+      templates   只检查内置模板
+    设置 FFMPEG 环境变量可以指定要测试的 ffmpeg 路径。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>FFmpegWebUI.Verify</RootNamespace>
+    <IsPublishable>false</IsPublishable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="LiteDB" Version="5.0.21" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 直接引用主项目的产物，保证验证走的是与界面完全相同的代码 -->
+    <ProjectReference Include="../../FFmpegWebUI.csproj" />
+  </ItemGroup>
+
+</Project>

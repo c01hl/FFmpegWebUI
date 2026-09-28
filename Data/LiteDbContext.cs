@@ -1,5 +1,6 @@
 using LiteDB;
 using FFmpegWebUI.Models;
+using FFmpegWebUI.Services;
 
 namespace FFmpegWebUI.Data;
 
@@ -22,14 +23,18 @@ public class LiteDbContext : ILiteDbContext
     public LiteDbContext(IConfiguration configuration)
     {
         var dbPath = configuration["FFmpegWebUI:DatabasePath"];
-        
-        if (string.IsNullOrEmpty(dbPath))
+
+        if (string.IsNullOrWhiteSpace(dbPath))
         {
-            // 默认路径
-            var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            var appFolder = Path.Combine(appDataPath, "FFmpegWebUI");
-            Directory.CreateDirectory(appFolder);
-            dbPath = Path.Combine(appFolder, "data.db");
+            // 默认放在跨平台的应用数据目录里（Windows: %LOCALAPPDATA%，
+            // macOS: ~/Library/Application Support，Linux: ~/.local/share）
+            dbPath = Path.Combine(AppPaths.DataDirectory, "data.db");
+        }
+        else
+        {
+            dbPath = AppPaths.ToAbsolute(dbPath);
+            var directory = Path.GetDirectoryName(dbPath);
+            if (!string.IsNullOrEmpty(directory)) AppPaths.EnsureDirectory(directory);
         }
 
         _database = new LiteDatabase(dbPath);

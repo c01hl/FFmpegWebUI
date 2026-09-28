@@ -63,3 +63,9 @@ logs/
 
 # Publish output
 publish/
+
+# 发布产物
+dist/
+
+# 内置 FFmpeg（体积大，按需自行放入）
+tools/ffmpeg/

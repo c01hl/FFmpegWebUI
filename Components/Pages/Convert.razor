@@ -1,740 +1,1318 @@
 @page "/convert"
-@using FFmpegWebUI.Models
-@using FFmpegWebUI.Services
-@using FFmpegWebUI.Components.Shared
+@using LiteDB
 @inject ITaskService TaskService
+@inject ITemplateService TemplateService
 @inject IFileService FileService
 @inject ISettingsService SettingsService
 @inject IFFmpegService FFmpegService
+@inject IHardwareDetectionService HardwareDetection
+@inject IAppStatusService AppStatusService
+@inject IToastService Toast
+@inject IJSRuntime JS
 @rendermode InteractiveServer
+@implements IDisposable
 
-<PageTitle>转换 - FFmpeg Web UI</PageTitle>
+<PageTitle>转换 - @AppInfo.Name</PageTitle>
 
-<div class="convert-container">
-    <h1>🔄 媒体转换</h1>
-
-    <div class="convert-layout">
-        <div class="form-section">
-            <h2>输入设置</h2>
-            <FileSelector Label="输入文件"
-                          @bind-Value="_inputPath"
-                          Placeholder="输入视频或音频文件路径"
-                          ValidateExists="true" />
-
-            <FileSelector Label="输出目录"
-                          @bind-Value="_outputDirectory"
-                          Placeholder="输出文件保存目录"
-                          IsDirectory="true"
-                          ValidateExists="false" />
-
-            <div class="form-group">
-                <label>输出文件名</label>
-                <input type="text" @bind="_outputFileName" @bind:event="oninput" placeholder="自动生成" />
-                <span class="help-text">
-                    留空则使用原文件名。支持格式化：
-                    <code>{filename}</code> 原文件名，
-                    <code>{date}</code> 日期，
-                    <code>{now:yyMMdd}</code> 自定义日期格式
-                </span>
-                <details class="format-help">
-                    <summary>查看所有格式化占位符</summary>
-                    <div class="format-list">
-                        <div class="format-item"><code>{filename}</code> 原文件名（不含扩展名）</div>
-                        <div class="format-item"><code>{ext}</code> 原文件扩展名</div>
-                        <div class="format-item"><code>{outputext}</code> 输出扩展名</div>
-                        <div class="format-item"><code>{dir}</code> 原文件所在文件夹名</div>
-                        <div class="format-item"><code>{date}</code> 日期 (yyyyMMdd)</div>
-                        <div class="format-item"><code>{time}</code> 时间 (HHmmss)</div>
-                        <div class="format-item"><code>{datetime}</code> 日期时间 (yyyyMMdd_HHmmss)</div>
-                        <div class="format-item"><code>{year}</code> 年份 (yyyy)</div>
-                        <div class="format-item"><code>{month}</code> 月份 (MM)</div>
-                        <div class="format-item"><code>{day}</code> 日 (dd)</div>
-                        <div class="format-item"><code>{now:格式}</code> 自定义日期格式，如 <code>{now:yyMMdd_HHmm}</code></div>
-                        <div class="format-item"><code>{random}</code> 8位随机字符</div>
-                        <div class="format-item"><code>{random:N}</code> N位随机字符，如 <code>{random:4}</code></div>
-                    </div>
-                </details>
-            </div>
-        </div>
-
-        <div class="template-section">
-            <TemplateSelector @bind-SelectedTemplate="_selectedTemplate" />
-        </div>
-    </div>
-
-    @if (_selectedTemplate != null && !string.IsNullOrEmpty(_inputPath))
-    {
-        <div class="preview-section">
-            <h3>预览</h3>
-            <div class="preview-info">
-                <div class="preview-item">
-                    <span class="label">输入:</span>
-                    <span class="value">@_inputPath</span>
-                </div>
-                <div class="preview-item">
-                    <span class="label">输出:</span>
-                    <span class="value">@GetOutputPath()</span>
-                </div>
-                <div class="preview-item">
-                    <span class="label">模板:</span>
-                    <span class="value">@_selectedTemplate.Name</span>
-                </div>
-                <div class="preview-item full-command">
-                    <span class="label">完整命令:</span>
-                    <div class="full-command-container">
-                        <code class="full-command-code">ffmpeg @_completeCommand</code>
-                        <button class="copy-command-btn @(_commandCopied ? "copied" : "")" @onclick="CopyFullCommand" title="复制命令">
-                            @if (_commandCopied)
-                            {
-                                <text>✓ 已复制</text>
-                            }
-                            else
-                            {
-                                <text>📋 复制</text>
-                            }
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    }
-
-    <div class="action-section">
-        <button class="btn-primary" 
-                @onclick="StartConversion" 
-                disabled="@(!CanStart)">
-            @if (_isProcessing)
+<div class="ffui-container">
+    <div class="page-head">
+        <h1>🔄 媒体转换</h1>
+        @if (_status is { FFmpegAvailable: false })
+        {
+            <span class="ffui-badge ffui-badge-danger">FFmpeg 不可用</span>
+        }
+        else if (_status is { FFmpegAvailable: true })
+        {
+            <span class="ffui-badge ffui-badge-success">FFmpeg @_status.FFmpegVersion</span>
+            @if (_status.AvailableHardwareEncoderCount > 0)
             {
-                <span class="spinner-small"></span>
-                <span>处理中...</span>
+                <span class="ffui-badge ffui-badge-info">🚀 @_status.AvailableHardwareEncoderCount 个硬件编码器可用</span>
             }
             else
             {
-                <span>🚀 开始转换</span>
+                <span class="ffui-badge">🧮 使用软件编码</span>
             }
-        </button>
-
-        @if (_isProcessing)
-        {
-            <button class="btn-cancel" @onclick="CancelConversion">
-                ❌ 取消
-            </button>
         }
     </div>
 
-    @if (_currentTask != null)
+    @if (_status is { FFmpegAvailable: false })
     {
-        <div class="progress-section">
-            <ProgressBar Label="转换进度"
-                         Progress="_currentTask.Progress"
-                         Speed="_currentTask.ProcessingSpeed"
-                         Eta="_currentTask.EstimatedTimeRemaining"
-                         CurrentTime="_currentTask.CurrentTime"
-                         TotalDuration="_currentTask.TotalDuration"
-                         Status="_currentTask.Status" />
-        </div>
-
-        @if (!string.IsNullOrEmpty(_currentTask.LogOutput))
-        {
-            <div class="log-section">
-                <LogViewer LogText="@_currentTask.LogOutput" />
+        <div class="ffui-alert ffui-alert-danger" role="alert">
+            <span aria-hidden="true">⚠️</span>
+            <div>
+                <strong>未找到可用的 FFmpeg，无法开始转换。</strong>
+                <div>当前使用的路径：<code>@_status.FFmpegPath</code></div>
+                <div class="alert-actions">
+                    <a class="ffui-btn ffui-btn-sm ffui-btn-primary" href="settings">前往设置指定 FFmpeg 路径</a>
+                    <button type="button" class="ffui-btn ffui-btn-sm" @onclick="RecheckAsync" disabled="@_isChecking">
+                        @if (_isChecking)
+                        {
+                            <span class="spinner" aria-hidden="true"></span>
+                        }
+                        重新检测
+                    </button>
+                </div>
             </div>
-        }
+        </div>
     }
 
-    @if (!string.IsNullOrEmpty(_statusMessage))
+    <div class="convert-layout">
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">1 · 输入与输出</h2>
+
+            <FileSelector Label="输入文件"
+                          @bind-Value="_inputPath"
+                          Placeholder="输入视频或音频文件的完整路径"
+                          ValidateExists="true"
+                          ShowFileInfo="true" />
+
+            @if (_isProbingMedia)
+            {
+                <div class="ffui-loading-row"><span class="spinner"></span> 正在读取媒体信息…</div>
+            }
+            else if (_mediaInfo != null)
+            {
+                <div class="media-info">
+                    <span class="ffui-badge ffui-badge-info">@_mediaInfo.FormatDisplay</span>
+                    <span class="ffui-badge">时长 @_mediaInfo.DurationDisplay</span>
+                    @if (_mediaInfo.HasVideo)
+                    {
+                        <span class="ffui-badge">@_mediaInfo.Width×@_mediaInfo.Height</span>
+                        <span class="ffui-badge">@_mediaInfo.FrameRate.ToString("0.##", CultureInfo.InvariantCulture) fps</span>
+                        <span class="ffui-badge">@(_mediaInfo.VideoCodec ?? "未知")</span>
+                    }
+                    @if (_mediaInfo.HasAudio)
+                    {
+                        <span class="ffui-badge">@(_mediaInfo.AudioCodec ?? "未知") · @_mediaInfo.AudioChannels 声道</span>
+                    }
+                    else
+                    {
+                        <span class="ffui-badge ffui-badge-warning">无音轨</span>
+                    }
+                    @if (_mediaInfo.SubtitleStreamCount > 0)
+                    {
+                        <span class="ffui-badge">@_mediaInfo.SubtitleStreamCount 条字幕</span>
+                    }
+                </div>
+            }
+
+            <FileSelector Label="输出目录"
+                          @bind-Value="_outputDirectory"
+                          Placeholder="转换结果的保存目录"
+                          IsDirectory="true"
+                          ValidateExists="false" />
+
+            <div class="field">
+                <label for="output-name">输出文件名</label>
+                <input id="output-name" type="text" @bind="_outputFileName" @bind:event="oninput"
+                       placeholder="@_autoOutputHint" />
+                <span class="field-help">
+                    留空则按「设置 → 输出文件命名规则」自动生成。支持
+                    <code>{filename}</code> <code>{date}</code> <code>{now:yyMMdd_HHmm}</code> <code>{random:6}</code>。
+                    <button type="button" class="link-btn" @onclick="() => _showFormatHelp = !_showFormatHelp">
+                        @(_showFormatHelp ? "收起全部占位符" : "查看全部占位符")
+                    </button>
+                </span>
+
+                @if (_showFormatHelp)
+                {
+                    <div class="format-help" role="note">
+                        <span><code>{filename}</code> 原文件名（不含扩展名）</span>
+                        <span><code>{ext}</code> 原扩展名</span>
+                        <span><code>{outputext}</code> 输出扩展名</span>
+                        <span><code>{dir}</code> 原文件所在文件夹名</span>
+                        <span><code>{date}</code> 日期 yyyyMMdd</span>
+                        <span><code>{time}</code> 时间 HHmmss</span>
+                        <span><code>{datetime}</code> yyyyMMdd_HHmmss</span>
+                        <span><code>{year}</code> <code>{month}</code> <code>{day}</code> <code>{hour}</code> <code>{minute}</code> <code>{second}</code></span>
+                        <span><code>{now:格式}</code> 自定义日期格式，如 <code>{now:yyMMdd_HHmm}</code></span>
+                        <span><code>{random}</code> 8 位随机串</span>
+                        <span><code>{random:N}</code> N 位随机串，如 <code>{random:6}</code></span>
+                    </div>
+                }
+            </div>
+        </section>
+
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">2 · 选择转换模板</h2>
+            <TemplateSelector @bind-SelectedTemplate="_selectedTemplate" InputPath="_inputPath" />
+        </section>
+    </div>
+
+    @if (_selectedTemplate != null)
     {
-        <div class="status-message @_statusClass">
-            @_statusMessage
-        </div>
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">
+                3 · 模板参数
+                <span class="ffui-badge">@_selectedTemplate.Name</span>
+            </h2>
+
+            @if (ValidationErrors.Count > 0)
+            {
+                <div class="ffui-alert ffui-alert-danger" role="alert">
+                    <span aria-hidden="true">⛔</span>
+                    <div>
+                        <strong>该模板存在问题，无法执行：</strong>
+                        <ul>
+                            @foreach (var issue in ValidationErrors)
+                            {
+                                <li>@issue.Message</li>
+                            }
+                        </ul>
+                    </div>
+                </div>
+            }
+
+            @if (_selectedTemplate.Parameters.Count == 0)
+            {
+                <p class="muted">该模板没有可调参数，将直接使用模板预设值。</p>
+            }
+            else
+            {
+                <TemplateParameterEditor Template="_selectedTemplate"
+                                         Values="_parameterValues"
+                                         ValuesChanged="OnParameterValuesChanged"
+                                         Disabled="_isStarting" />
+            }
+        </section>
+    }
+
+    @if (!string.IsNullOrEmpty(_inputPath) && _selectedTemplate != null)
+    {
+        <section class="ffui-panel">
+            <h2 class="ffui-panel-title">4 · 确认并开始</h2>
+
+            <div class="preview-grid">
+                <div class="preview-row">
+                    <span class="preview-label">输入</span>
+                    <span class="preview-value mono" title="@_inputPath">@_inputPath</span>
+                </div>
+                <div class="preview-row">
+                    <span class="preview-label">输出</span>
+                    <span class="preview-value mono" title="@ResolvedOutputPath">@(ResolvedOutputPath ?? "尚未确定")</span>
+                </div>
+                <div class="preview-row">
+                    <span class="preview-label">编码器</span>
+                    <span class="preview-value">
+                        @if (_encoderProfile == null)
+                        {
+                            <span class="muted">由模板内部指定</span>
+                        }
+                        else
+                        {
+                            <span class="ffui-badge @(_encoderProfile.IsHardware ? "ffui-badge-success" : "")">
+                                @(_encoderProfile.IsHardware ? "🚀 硬件加速" : "🧮 软件编码") · @_encoderProfile.Name
+                            </span>
+                            <span class="muted"> @EncoderCatalog.FamilyDisplayName(_encoderProfile.Family)</span>
+                        }
+                    </span>
+                </div>
+            </div>
+
+            @if (_conflictNotice != null)
+            {
+                <div class="ffui-alert ffui-alert-warning" role="status">
+                    <span aria-hidden="true">📄</span>
+                    <div>
+                        <div>@_conflictNotice</div>
+                        <div class="alert-actions">
+                            <button type="button" class="ffui-btn ffui-btn-sm" @onclick="UseOverwriteAsync">覆盖已有文件</button>
+                            <button type="button" class="ffui-btn ffui-btn-sm" @onclick="UseNewNameAsync">保留两者（自动改名）</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @foreach (var warning in _previewWarnings)
+            {
+                <div class="ffui-alert ffui-alert-warning" role="status">
+                    <span aria-hidden="true">💡</span>
+                    <div>@warning</div>
+                </div>
+            }
+
+            <div class="command-box">
+                <div class="command-head">
+                    <span>完整命令（可直接复制到终端执行）</span>
+                    <div class="command-actions">
+                        <button type="button" class="ffui-btn ffui-btn-sm" @onclick="CopyCommandAsync">
+                            @(_commandCopied ? "✓ 已复制" : "📋 复制")
+                        </button>
+                        <button type="button" class="ffui-btn ffui-btn-sm" @onclick="() => _commandWrap = !_commandWrap">
+                            @(_commandWrap ? "不换行" : "自动换行")
+                        </button>
+                    </div>
+                </div>
+                <pre class="command-code @(_commandWrap ? "wrap" : "")">ffmpeg @_previewCommand</pre>
+            </div>
+
+            <div class="action-bar">
+                <button type="button" class="ffui-btn ffui-btn-primary ffui-btn-lg" @onclick="StartConversionAsync"
+                        disabled="@(!CanStart)">
+                    @if (_isStarting)
+                    {
+                        <span class="spinner" aria-hidden="true"></span>
+                        <span>正在启动…</span>
+                    }
+                    else
+                    {
+                        <span>🚀 开始转换</span>
+                    }
+                </button>
+
+                <button type="button" class="ffui-btn" @onclick="TestTemplateAsync" disabled="@_isTesting">
+                    @if (_isTesting)
+                    {
+                        <span class="spinner" aria-hidden="true"></span>
+                        <span>试运行中…</span>
+                    }
+                    else
+                    {
+                        <span>🧪 试运行模板</span>
+                    }
+                </button>
+
+                @if (_selectedTemplate.Parameters.Count > 0)
+                {
+                    <button type="button" class="ffui-btn" @onclick="ResetParameters" disabled="@_isStarting">重置参数</button>
+                }
+
+                @if (!CanStart && !_isStarting && !string.IsNullOrEmpty(CannotStartReason))
+                {
+                    <span class="muted">@CannotStartReason</span>
+                }
+            </div>
+
+            @if (_testResult != null)
+            {
+                <div class="ffui-alert @(_testResult.Success ? "ffui-alert-success" : "ffui-alert-danger")" role="status">
+                    <span aria-hidden="true">@(_testResult.Success ? "✅" : "❌")</span>
+                    <div class="test-result">
+                        <div>@_testResult.Message</div>
+                        @if (!_testResult.Success && !string.IsNullOrEmpty(_testResult.Output))
+                        {
+                            <details>
+                                <summary>查看 FFmpeg 输出</summary>
+                                <pre class="test-output">@_testResult.Output</pre>
+                            </details>
+                        }
+                        <button type="button" class="ffui-btn ffui-btn-sm" @onclick="() => _testResult = null">关闭</button>
+                    </div>
+                </div>
+            }
+        </section>
+    }
+
+    @if (_activeTasks.Count > 0)
+    {
+        <section class="ffui-panel">
+            <h2 class="ffui-section-title">
+                <span>⏱️ 进行中的转换</span>
+                <span class="ffui-badge">@_activeTasks.Count</span>
+                <button type="button" class="ffui-btn ffui-btn-sm" @onclick="RefreshActiveAsync">刷新</button>
+            </h2>
+
+            @foreach (var task in _activeTasks)
+            {
+                <div class="active-task" @key="task.Id">
+                    <div class="active-task-head">
+                        <span class="task-name" title="@task.InputPath">@Path.GetFileName(task.InputPath)</span>
+                        <span class="ffui-badge @StatusBadgeClass(task.Status)">@StatusText(task.Status)</span>
+                        @if (!string.IsNullOrEmpty(task.TemplateName))
+                        {
+                            <span class="muted">@task.TemplateName</span>
+                        }
+                    </div>
+
+                    <ProgressBar Progress="task.Progress"
+                                 Speed="task.ProcessingSpeed"
+                                 Eta="task.EstimatedTimeRemaining"
+                                 CurrentTime="task.CurrentTime"
+                                 TotalDuration="task.TotalDuration"
+                                 Status="task.Status" />
+
+                    <div class="active-task-actions">
+                        @if (task.Status == TaskStatus.Running)
+                        {
+                            <button type="button" class="ffui-btn ffui-btn-sm"
+                                    title="发送 q 让 FFmpeg 写完文件尾再退出，已产出的文件仍然可用"
+                                    @onclick="() => GracefulStopAsync(task.Id)">
+                                ⏏️ 优雅停止
+                            </button>
+                            <button type="button" class="ffui-btn ffui-btn-sm ffui-btn-danger"
+                                    @onclick="() => ForceCancelAsync(task.Id)">
+                                ❌ 强制终止
+                            </button>
+                        }
+                        else
+                        {
+                            <button type="button" class="ffui-btn ffui-btn-sm ffui-btn-danger"
+                                    @onclick="() => ForceCancelAsync(task.Id)">
+                                取消排队
+                            </button>
+                        }
+                        <button type="button" class="ffui-btn ffui-btn-sm" @onclick="() => ToggleLogAsync(task.Id)">
+                            @(_expandedTaskId == task.Id ? "▲ 收起日志" : "▼ 查看日志")
+                        </button>
+                    </div>
+
+                    @if (_expandedTaskId == task.Id)
+                    {
+                        <div class="active-task-log">
+                            <LogViewer LogText="@GetLiveLog(task.Id)" MaxHeight="260px" />
+                        </div>
+                    }
+                </div>
+            }
+        </section>
     }
 
     @if (_recentTasks.Count > 0)
     {
-        <div class="history-section">
-            <h3>最近任务</h3>
-            <table class="history-table">
-                <thead>
-                    <tr>
-                        <th>输入文件</th>
-                        <th>状态</th>
-                        <th>时间</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @foreach (var task in _recentTasks.Take(5))
-                    {
+        <section class="ffui-panel">
+            <h2 class="ffui-section-title">
+                <span>📜 最近任务</span>
+                <a class="ffui-btn ffui-btn-sm" href="tasks">查看全部</a>
+            </h2>
+
+            <div class="table-scroll">
+                <table class="task-table">
+                    <thead>
                         <tr>
-                            <td>@Path.GetFileName(task.InputPath)</td>
-                            <td>
-                                <span class="status-badge @GetStatusClass(task.Status)">
-                                    @GetStatusText(task.Status)
-                                </span>
-                            </td>
-                            <td>@task.CreatedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
+                            <th scope="col">输入文件</th>
+                            <th scope="col">状态</th>
+                            <th scope="col">耗时</th>
+                            <th scope="col">创建时间</th>
+                            <th scope="col">操作</th>
                         </tr>
-                    }
-                </tbody>
-            </table>
-        </div>
+                    </thead>
+                    <tbody>
+                        @foreach (var task in _recentTasks)
+                        {
+                            <tr @key="task.Id">
+                                <td class="ellipsis" title="@task.InputPath">@Path.GetFileName(task.InputPath)</td>
+                                <td><span class="ffui-badge @StatusBadgeClass(task.Status)">@StatusText(task.Status)</span></td>
+                                <td>@FormatDuration(task.DurationSeconds)</td>
+                                <td>@task.CreatedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
+                                <td class="row-actions">
+                                    <button type="button" class="ffui-btn ffui-btn-sm" @onclick="() => RetryAsync(task.Id)">重试</button>
+                                    @if (task.Status == TaskStatus.Completed)
+                                    {
+                                        <button type="button" class="ffui-btn ffui-btn-sm" @onclick="() => OpenOutputFolderAsync(task)">打开目录</button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </section>
     }
 </div>
+
+<style>
+    .page-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
+    .page-head h1 { margin: 0; }
+
+    .alert-actions { display: flex; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }
+
+    .convert-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 1.25rem;
+        margin-bottom: 1.25rem;
+        align-items: start;
+    }
+
+    section.ffui-panel { margin-bottom: 1.25rem; }
+
+    .media-info { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.25rem 0 0.9rem; }
+
+    .field { margin-top: 0.9rem; }
+    .field label { display: block; font-weight: 500; margin-bottom: 0.35rem; font-size: 0.92rem; }
+    .field-help { display: block; font-size: 0.8rem; color: var(--text-muted); margin-top: 0.35rem; }
+
+    .link-btn {
+        background: none;
+        border: none;
+        color: var(--primary-color);
+        padding: 0 0.2rem;
+        font-size: 0.8rem;
+        cursor: pointer;
+        text-decoration: underline;
+    }
+
+    .format-help {
+        display: flex;
+        flex-direction: column;
+        gap: 0.28rem;
+        margin-top: 0.5rem;
+        padding: 0.7rem 0.85rem;
+        background: var(--surface-3);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        font-size: 0.78rem;
+        color: var(--text-secondary);
+    }
+
+    .muted { color: var(--text-muted); font-size: 0.85rem; }
+    .mono { font-family: var(--font-mono); }
+
+    .preview-grid { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
+    .preview-row { display: flex; gap: 0.75rem; align-items: baseline; }
+    .preview-label { flex: 0 0 56px; color: var(--text-muted); font-size: 0.85rem; }
+    .preview-value { flex: 1; min-width: 0; word-break: break-all; font-size: 0.88rem; }
+
+    .command-box {
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        overflow: hidden;
+        margin-bottom: 1rem;
+    }
+
+    .command-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.45rem 0.75rem;
+        background: var(--surface-3);
+        border-bottom: 1px solid var(--border-color);
+        font-size: 0.82rem;
+        color: var(--text-secondary);
+        flex-wrap: wrap;
+    }
+
+    .command-actions { display: flex; gap: 0.4rem; }
+
+    .command-code {
+        margin: 0;
+        padding: 0.8rem;
+        background: var(--code-bg);
+        color: var(--text-primary);
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+        line-height: 1.55;
+        white-space: pre;
+        overflow-x: auto;
+    }
+
+    .command-code.wrap { white-space: pre-wrap; word-break: break-all; overflow-x: hidden; }
+
+    .action-bar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+
+    .test-result { display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+
+    .test-output {
+        margin: 0.5rem 0 0;
+        max-height: 220px;
+        overflow: auto;
+        font-size: 0.78rem;
+        background: var(--code-bg);
+        padding: 0.6rem;
+    }
+
+    .active-task {
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        padding: 0.85rem;
+        margin-bottom: 0.75rem;
+        background: var(--surface-3);
+    }
+
+    .active-task-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+    .task-name { font-weight: 600; word-break: break-all; }
+    .active-task-actions { display: flex; gap: 0.5rem; margin-top: 0.7rem; flex-wrap: wrap; }
+    .active-task-log { margin-top: 0.7rem; }
+
+    .table-scroll { overflow-x: auto; }
+    .task-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; min-width: 620px; }
+    .task-table th, .task-table td { padding: 0.5rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border-color); }
+    .task-table th { color: var(--text-secondary); font-weight: 600; font-size: 0.82rem; }
+    .ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-actions { display: flex; gap: 0.35rem; }
+
+    @@media (max-width: 1000px) {
+        .convert-layout { grid-template-columns: 1fr; }
+    }
+</style>
 
 @code {
     private string _inputPath = string.Empty;
     private string _outputDirectory = string.Empty;
     private string _outputFileName = string.Empty;
     private CommandTemplate? _selectedTemplate;
+    private Dictionary<string, string> _parameterValues = new(StringComparer.OrdinalIgnoreCase);
 
-    private string _lastInputPath = string.Empty;
-    private CommandTemplate? _lastSelectedTemplate;
-    private string _lastOutputFileName = string.Empty;
-    private string _lastOutputDirectory = string.Empty;
+    private MediaInfo? _mediaInfo;
+    private bool _isProbingMedia;
+    private string _lastProbedPath = string.Empty;
 
-    private ConversionTask? _currentTask;
+    private AppStatus? _status;
+    private bool _isChecking;
+
+    private EncoderProfile? _encoderProfile;
+    private string _previewCommand = string.Empty;
+    private List<string> _previewWarnings = [];
+
+    /// <summary>模板要求的硬件在本机不存在 —— 明确禁用「开始转换」，而不是让用户点了才失败</summary>
+    private bool _templateUnrunnable;
+    private bool _commandCopied;
+    private bool _commandWrap = true;
+    private bool _showFormatHelp;
+
+    private string _conflictNotice = string.Empty;
+    private bool _forceOverwrite;
+    private string? _resolvedOutputPath;
+
+    private bool _isStarting;
+    private bool _isTesting;
+    private TemplateTestResult? _testResult;
+
+    private List<ConversionTask> _activeTasks = [];
     private List<ConversionTask> _recentTasks = [];
-    private bool _isProcessing;
-    private string _statusMessage = string.Empty;
-    private string _statusClass = string.Empty;
-    private string _completeCommand = string.Empty;
-    private bool _commandCopied = false;
+    private ObjectId? _expandedTaskId;
+    private readonly Dictionary<string, string> _liveLogs = [];
 
-    private bool CanStart => !_isProcessing &&
-                             !string.IsNullOrEmpty(_inputPath) &&
-                             !string.IsNullOrEmpty(_outputDirectory) &&
-                             _selectedTemplate != null;
+    private OutputNamingRule _namingRule = OutputNamingRule.Suffix;
+    private string _namingSuffix = "_converted";
+
+    private List<TemplateIssue> _validationErrors = [];
+    private ObjectId? _validatedTemplateId;
+
+    /// <summary>从模板页面跳转过来时预选的模板 ID（/convert?template=&lt;id&gt;）</summary>
+    [SupplyParameterFromQuery(Name = "template")]
+    public string? TemplateIdFromQuery { get; set; }
+
+    private string? _appliedQueryTemplate;
+
+    private List<TemplateIssue> ValidationErrors => _validationErrors;
+
+    private string _autoOutputHint = "自动生成";
+
+    private bool CanStart => !_isStarting
+                             && _status is not { FFmpegAvailable: false }
+                             && !string.IsNullOrWhiteSpace(_inputPath)
+                             && !string.IsNullOrWhiteSpace(_outputDirectory)
+                             && _selectedTemplate != null
+                             && _validationErrors.Count == 0
+                             && !_templateUnrunnable;
+
+    private string CannotStartReason
+    {
+        get
+        {
+            if (_status is { FFmpegAvailable: false }) return "FFmpeg 不可用，请先到设置里指定路径";
+            if (string.IsNullOrWhiteSpace(_inputPath)) return "请选择输入文件";
+            if (_selectedTemplate == null) return "请选择转换模板";
+            if (string.IsNullOrWhiteSpace(_outputDirectory)) return "请选择输出目录";
+            if (_validationErrors.Count > 0) return "当前模板存在问题，请改用其他模板";
+            if (_templateUnrunnable) return "当前模板要求的硬件编码器在本机不可用，请改用「推荐」分类下的模板";
+            return string.Empty;
+        }
+    }
+
+    private string? ResolvedOutputPath => _resolvedOutputPath;
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadDefaults();
-        await LoadRecentTasks();
-
-        TaskService.TaskProgressChanged += OnProgressChanged;
-        TaskService.TaskStatusChanged += OnStatusChanged;
-    }
-
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-        if (firstRender)
-        {
-            await UpdateCompleteCommand();
-            _lastInputPath = _inputPath;
-            _lastSelectedTemplate = _selectedTemplate;
-            _lastOutputFileName = _outputFileName;
-            _lastOutputDirectory = _outputDirectory;
-        }
-        else
-        {
-            // Check if any relevant values have changed
-            if (_inputPath != _lastInputPath ||
-                _selectedTemplate != _lastSelectedTemplate ||
-                _outputFileName != _lastOutputFileName ||
-                _outputDirectory != _lastOutputDirectory)
-            {
-                await UpdateCompleteCommand();
-                _lastInputPath = _inputPath;
-                _lastSelectedTemplate = _selectedTemplate;
-                _lastOutputFileName = _outputFileName;
-                _lastOutputDirectory = _outputDirectory;
-            }
-        }
-    }
-
-    private async Task UpdateCompleteCommand()
-    {
-        if (_selectedTemplate != null && !string.IsNullOrEmpty(_inputPath))
-        {
-            var outputPath = GetOutputPath();
-            // Only update if both paths are valid
-            if (!string.IsNullOrEmpty(outputPath))
-            {
-                _completeCommand = FFmpegService.BuildCommand(_selectedTemplate, _inputPath, outputPath);
-            }
-            else
-            {
-                _completeCommand = "输出路径未配置";
-            }
-        }
-        else
-        {
-            _completeCommand = string.Empty;
-        }
-        StateHasChanged();
-    }
-
-    private async Task CopyFullCommand()
-    {
-        _commandCopied = true;
-        StateHasChanged();
-
-        // Reset the copied status after 2 seconds
-        await Task.Delay(2000);
-        _commandCopied = false;
-        StateHasChanged();
-    }
-
-    private async Task LoadDefaults()
-    {
-        var settings = await SettingsService.GetSettingsAsync();
-        _outputDirectory = settings.DefaultOutputDirectory;
-    }
-
-    private CommandTemplate? _previousTemplate;
-    private string _previousInputPath = string.Empty;
-
-    protected override async Task OnParametersSetAsync()
-    {
-        // Check if template or input path has changed
-        if (_selectedTemplate != _previousTemplate || _inputPath != _previousInputPath)
-        {
-            _previousTemplate = _selectedTemplate;
-            _previousInputPath = _inputPath;
-            await UpdateCompleteCommand();
-        }
-    }
-
-    private async Task LoadRecentTasks()
-    {
-        _recentTasks = await TaskService.GetTaskHistoryAsync(5);
-    }
-
-    private string GetOutputPath()
-    {
-        if (_selectedTemplate == null || string.IsNullOrEmpty(_inputPath))
-            return string.Empty;
-
-        string fileName;
-        if (!string.IsNullOrEmpty(_outputFileName))
-        {
-            // 使用格式化功能处理用户输入的文件名模板
-            fileName = FileService.FormatFileName(_outputFileName, _inputPath, _selectedTemplate.OutputExtension);
-        }
-        else
-        {
-            // 默认使用原文件名 + _converted 后缀
-            fileName = Path.GetFileNameWithoutExtension(_inputPath) + "_converted";
-        }
-
-        return Path.Combine(_outputDirectory, $"{fileName}.{_selectedTemplate.OutputExtension}");
-    }
-
-    private async Task StartConversion()
-    {
-        if (!CanStart || _selectedTemplate == null) return;
-
-        _isProcessing = true;
-        _statusMessage = string.Empty;
-        StateHasChanged();
-
         try
         {
-            // 确保输出目录存在
-            FileService.EnsureDirectoryExists(GetOutputPath());
-
-            _currentTask = await TaskService.CreateTaskAsync(
-                _inputPath,
-                GetOutputPath(),
-                _selectedTemplate.Id);
-
-            _ = Task.Run(async () =>
-            {
-                await TaskService.StartTaskAsync(_currentTask.Id);
-            });
+            var settings = await SettingsService.GetSettingsAsync();
+            _outputDirectory = settings.DefaultOutputDirectory;
+            _namingRule = settings.OutputNaming;
+            _namingSuffix = settings.OutputSuffix;
         }
         catch (Exception ex)
         {
-            _statusMessage = $"创建任务失败: {ex.Message}";
-            _statusClass = "error";
-            _isProcessing = false;
+            Toast.Error($"读取设置失败：{ex.Message}");
         }
 
-        StateHasChanged();
+        await RefreshActiveAsync();
+        await LoadRecentAsync();
+
+        TaskService.TaskProgressChanged += OnProgressChanged;
+        TaskService.TaskStatusChanged += OnStatusChanged;
+        TaskService.TaskLogAppended += OnLogAppended;
+
+        _ = LoadStatusAsync();
     }
 
-    private async Task CancelConversion()
+    protected override async Task OnParametersSetAsync()
     {
-        if (_currentTask != null)
+        // 支持从「模板」页跳转时带上 ?template=<id> 预选模板
+        if (!string.IsNullOrEmpty(TemplateIdFromQuery) &&
+            !string.Equals(_appliedQueryTemplate, TemplateIdFromQuery, StringComparison.Ordinal))
         {
-            await TaskService.CancelTaskAsync(_currentTask.Id);
+            _appliedQueryTemplate = TemplateIdFromQuery;
+
+            ObjectId? queryId = null;
+            try
+            {
+                // LiteDB 5 的 ObjectId 没有 TryParse，构造失败会抛异常
+                queryId = new ObjectId(TemplateIdFromQuery);
+            }
+            catch
+            {
+                queryId = null;
+            }
+
+            if (queryId == null)
+            {
+                Toast.Warning("链接中的模板标识无效。");
+            }
+            else
+            {
+                try
+                {
+                    var preselected = await TemplateService.GetTemplateByIdAsync(queryId);
+                    if (preselected != null)
+                    {
+                        _selectedTemplate = preselected;
+                        Toast.Success($"已预选模板：{preselected.Name}");
+                    }
+                    else
+                    {
+                        Toast.Warning("链接中的模板不存在或已被删除。");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Toast.Error($"读取预选模板失败：{ex.Message}");
+                }
+            }
+        }
+
+        var templateChanged = _selectedTemplate != null && _validatedTemplateId != _selectedTemplate.Id;
+
+        if (templateChanged)
+        {
+            _validatedTemplateId = _selectedTemplate!.Id;
+            _validationErrors = TemplateService.Validate(_selectedTemplate)
+                .Where(i => i.Severity == TemplateIssueSeverity.Error)
+                .ToList();
+            _parameterValues = TemplateService.CreateDefaultParameterValues(_selectedTemplate);
+            _testResult = null;
+
+            var extension = string.IsNullOrWhiteSpace(_selectedTemplate.OutputExtension)
+                ? "mp4"
+                : _selectedTemplate.OutputExtension.TrimStart('.');
+            _autoOutputHint = BuildAutoNamePreview(extension);
+        }
+        else if (_selectedTemplate == null && _validatedTemplateId != null)
+        {
+            _validatedTemplateId = null;
+            _validationErrors = [];
+            _parameterValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        if (!string.Equals(_inputPath, _lastProbedPath, StringComparison.Ordinal))
+        {
+            _lastProbedPath = _inputPath;
+            await ProbeMediaAsync();
+        }
+
+        await RebuildPreviewAsync();
+    }
+
+    private string BuildAutoNamePreview(string extension)
+    {
+        var baseName = string.IsNullOrWhiteSpace(_inputPath)
+            ? "输入文件名"
+            : Path.GetFileNameWithoutExtension(_inputPath);
+
+        return _namingRule == OutputNamingRule.Suffix
+            ? $"{baseName}{_namingSuffix}.{extension}"
+            : $"{baseName}.{extension}";
+    }
+
+    // ── 环境状态 ────────────────────────────────────────────────────
+
+    private async Task LoadStatusAsync()
+    {
+        _isChecking = true;
+        try
+        {
+            _status = await AppStatusService.GetStatusAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"环境检测失败：{ex.Message}");
+        }
+        finally
+        {
+            _isChecking = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RecheckAsync()
+    {
+        _isChecking = true;
+        try
+        {
+            _status = await AppStatusService.GetStatusAsync(forceRefresh: true);
+            Toast.Success("已重新检测环境");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"重新检测失败：{ex.Message}");
+        }
+        finally
+        {
+            _isChecking = false;
+        }
+    }
+
+    private async Task ProbeMediaAsync()
+    {
+        _mediaInfo = null;
+
+        if (string.IsNullOrWhiteSpace(_inputPath) || !File.Exists(_inputPath))
+        {
+            return;
+        }
+
+        _isProbingMedia = true;
+        try
+        {
+            _mediaInfo = await FFmpegService.GetMediaInfoAsync(_inputPath);
+            if (_mediaInfo == null)
+            {
+                Toast.Warning("无法读取该文件的媒体信息，可能是格式不受支持或文件已损坏。");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"读取媒体信息失败：{ex.Message}");
+        }
+        finally
+        {
+            _isProbingMedia = false;
+        }
+    }
+
+    // ── 命令预览 ────────────────────────────────────────────────────
+
+    private async Task RebuildPreviewAsync()
+    {
+        _previewWarnings = [];
+        _templateUnrunnable = false;
+        _encoderProfile = null;
+        _previewCommand = string.Empty;
+        _conflictNotice = string.Empty;
+        _resolvedOutputPath = null;
+
+        if (_selectedTemplate == null || string.IsNullOrWhiteSpace(_inputPath) || string.IsNullOrWhiteSpace(_outputDirectory))
+        {
+            return;
+        }
+
+        try
+        {
+            var requested = GetRequestedOutputPath();
+            if (string.IsNullOrEmpty(requested))
+            {
+                return;
+            }
+
+            var settings = await SettingsService.GetSettingsAsync();
+            var action = _forceOverwrite ? FileExistsAction.Overwrite : settings.FileExistsAction;
+            var existed = File.Exists(requested);
+            // 传入输入路径，让「输出 == 输入」这种会破坏源文件的情况在预览阶段就显示出来
+            var resolution = OutputPathResolver.Resolve(requested, action, _inputPath);
+
+            if (existed && !_forceOverwrite)
+            {
+                _conflictNotice = resolution.Skip
+                    ? "输出文件已存在：按当前设置将跳过本次转换，不会覆盖原文件。"
+                    : resolution.Renamed
+                        ? "输出文件已存在，将自动改名后保存，避免覆盖原文件。"
+                        : "输出文件已存在，将按设置覆盖。";
+            }
+
+            // 「输出 == 输入」会被上一行当成普通的「文件已存在」，这里要给出更准确的说明
+            if (OutputPathResolver.PathsEqual(requested, _inputPath))
+            {
+                _conflictNotice = "输出路径与输入文件相同：已自动改名，避免把源文件覆盖掉。" +
+                                  "（把输出目录换成别的目录、或让输出文件名带上后缀，可以避免改名。）";
+            }
+
+            _resolvedOutputPath = resolution.OutputPath;
+
+            var context = new CommandContext
+            {
+                InputPath = _inputPath,
+                OutputPath = resolution.OutputPath,
+                Parameters = _parameterValues,
+                Media = _mediaInfo,
+                AudioEncoder = ResolveAudioEncoder(_selectedTemplate)
+            };
+
+            // 需要自动选择编码器时才去解析硬件信息
+            var usesEncoder = _selectedTemplate.CommandArgs.Contains("{encoder}", StringComparison.OrdinalIgnoreCase)
+                              || _selectedTemplate.HardwareMode != HardwareAccelerationMode.None;
+
+            if (usesEncoder)
+            {
+                var codec = DetermineCodec(_selectedTemplate);
+                var strict = _selectedTemplate.HardwareMode == HardwareAccelerationMode.Required;
+                var name = await HardwareDetection.GetRecommendedEncoderAsync(codec, _selectedTemplate.RequiredEncoder, strict);
+
+                if (name is null)
+                {
+                    // 严格模式下拿不到编码器 = 本机缺少该厂商硬件，模板会被执行层拒绝
+                    var family = EncoderCatalog.FamilyDisplayName(
+                        EncoderCatalog.Find(_selectedTemplate.RequiredEncoder ?? "")?.Family
+                        ?? _selectedTemplate.RequiredEncoder ?? "");
+                    _templateUnrunnable = true;
+                    _previewWarnings.Add(
+                        $"❌ 该模板要求使用 {family} 硬件编码，但本机没有可用的对应编码器，" +
+                        "无法执行。建议改用「推荐」分类下会自动挑选编码器的模板。");
+                }
+
+                _encoderProfile = EncoderCatalog.Find(name ?? string.Empty) ?? EncoderCatalog.SoftwareFallback(codec);
+            }
+
+            context.Encoder = _encoderProfile;
+
+            var built = FFmpegService.BuildCommand(_selectedTemplate, context);
+            _previewCommand = built.CommandLine;
+            _previewWarnings.AddRange(built.Warnings);
+        }
+        catch (Exception ex)
+        {
+            _previewWarnings = [$"生成命令预览失败：{ex.Message}"];
+        }
+    }
+
+    private static string DetermineCodec(CommandTemplate template)
+    {
+        if (!string.IsNullOrWhiteSpace(template.TargetCodec))
+        {
+            return HardwareDetectionService.NormalizeCodec(template.TargetCodec);
+        }
+        if (!string.IsNullOrWhiteSpace(template.RequiredEncoder))
+        {
+            var profile = EncoderCatalog.Find(template.RequiredEncoder);
+            if (profile != null) return profile.Codec;
+            var family = EncoderCatalog.ByFamily(template.RequiredEncoder).FirstOrDefault();
+            if (family != null) return family.Codec;
+        }
+        var fromExtension = HardwareDetectionService.NormalizeCodec(template.OutputExtension);
+        if (fromExtension is "h264" or "hevc" or "av1" or "vp9") return fromExtension;
+        return "h264";
+    }
+
+    private static string ResolveAudioEncoder(CommandTemplate template)
+    {
+        foreach (var candidate in new[] { "libopus", "libmp3lame", "flac", "aac" })
+        {
+            if (template.CommandArgs.Contains(candidate, StringComparison.OrdinalIgnoreCase)) return candidate;
+        }
+        return template.OutputExtension.ToLowerInvariant() switch
+        {
+            "webm" => "libopus",
+            "mp3" => "libmp3lame",
+            "flac" => "flac",
+            "ogg" => "libopus",
+            _ => "aac"
+        };
+    }
+
+    private string GetRequestedOutputPath()
+    {
+        if (_selectedTemplate == null || string.IsNullOrWhiteSpace(_inputPath)) return string.Empty;
+
+        var extension = string.IsNullOrWhiteSpace(_selectedTemplate.OutputExtension)
+            ? "mp4"
+            : _selectedTemplate.OutputExtension.TrimStart('.');
+
+        string fileName;
+        if (!string.IsNullOrWhiteSpace(_outputFileName))
+        {
+            fileName = FileService.FormatFileName(_outputFileName, _inputPath, extension);
+        }
+        else
+        {
+            fileName = Path.GetFileNameWithoutExtension(_inputPath);
+            if (_namingRule == OutputNamingRule.Suffix && !string.IsNullOrEmpty(_namingSuffix))
+            {
+                fileName += _namingSuffix;
+            }
+        }
+
+        return Path.Combine(_outputDirectory, $"{fileName}.{extension}");
+    }
+
+    private async Task UseOverwriteAsync()
+    {
+        _forceOverwrite = true;
+        await RebuildPreviewAsync();
+    }
+
+    private async Task UseNewNameAsync()
+    {
+        _forceOverwrite = false;
+        await RebuildPreviewAsync();
+    }
+
+    private void OnParameterValuesChanged(Dictionary<string, string> values)
+    {
+        _parameterValues = values;
+        _ = RebuildPreviewAsync();
+    }
+
+    private void ResetParameters()
+    {
+        if (_selectedTemplate == null) return;
+        _parameterValues = TemplateService.CreateDefaultParameterValues(_selectedTemplate);
+        _testResult = null;
+        _ = RebuildPreviewAsync();
+    }
+
+    private async Task CopyCommandAsync()
+    {
+        var text = "ffmpeg " + _previewCommand;
+        var ok = await JS.InvokeAsync<bool>("ffui.copyText", text);
+
+        if (ok)
+        {
+            _commandCopied = true;
+            Toast.Success("命令已复制到剪贴板");
+            _ = ResetCopiedFlagAsync();
+        }
+        else
+        {
+            Toast.Error("复制失败：浏览器不允许访问剪贴板。请手动选中命令文本后复制。");
+        }
+
+        await Task.CompletedTask;
+    }
+
+    private async Task ResetCopiedFlagAsync()
+    {
+        await Task.Delay(2000);
+        _commandCopied = false;
+        try { await InvokeAsync(StateHasChanged); } catch { /* 组件已销毁 */ }
+    }
+
+    // ── 执行 ────────────────────────────────────────────────────────
+
+    private async Task StartConversionAsync()
+    {
+        if (!CanStart || _selectedTemplate == null) return;
+
+        _isStarting = true;
+        try
+        {
+            var outputPath = _resolvedOutputPath ?? GetRequestedOutputPath();
+            if (string.IsNullOrWhiteSpace(outputPath))
+            {
+                Toast.Error("无法确定输出路径，请检查输出目录设置。");
+                return;
+            }
+
+            var directory = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            if (!OutputPathResolver.IsOutputPathWritable(outputPath))
+            {
+                Toast.Error($"输出目录不可写：{directory}。请换一个目录或检查文件权限。");
+                return;
+            }
+
+            var overwrite = _forceOverwrite || !File.Exists(outputPath);
+            var task = await TaskService.CreateTaskAsync(
+                _inputPath, outputPath, _selectedTemplate.Id, _parameterValues, overwrite);
+
+            if (await TaskService.StartTaskAsync(task.Id))
+            {
+                Toast.Success($"已开始转换：{Path.GetFileName(task.InputPath)}");
+                _expandedTaskId = task.Id;
+            }
+            else
+            {
+                Toast.Warning("任务已创建但未能立即调度，请到「任务列表」查看。");
+            }
+
+            await RefreshActiveAsync();
+            await LoadRecentAsync();
+        }
+        catch (FileNotFoundException ex)
+        {
+            Toast.Error(ex.Message);
+        }
+        catch (ArgumentException ex)
+        {
+            Toast.Error(ex.Message);
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"创建任务失败：{ex.Message}");
+        }
+        finally
+        {
+            _isStarting = false;
+        }
+    }
+
+    private async Task TestTemplateAsync()
+    {
+        if (_selectedTemplate == null) return;
+
+        _isTesting = true;
+        _testResult = null;
+        try
+        {
+            _testResult = await TemplateService.TestTemplateAsync(_selectedTemplate, _parameterValues);
+            if (_testResult.Success) Toast.Success("模板试运行成功，该模板在本机可用");
+            else Toast.Error("模板试运行失败，请看下方详情");
+        }
+        catch (Exception ex)
+        {
+            _testResult = new TemplateTestResult(false, $"试运行出错：{ex.Message}", string.Empty, string.Empty, TimeSpan.Zero);
+            Toast.Error($"试运行出错：{ex.Message}");
+        }
+        finally
+        {
+            _isTesting = false;
+        }
+    }
+
+    private async Task GracefulStopAsync(ObjectId taskId)
+    {
+        if (await TaskService.CancelTaskAsync(taskId, graceful: true))
+        {
+            Toast.Warning("已发送优雅停止指令，FFmpeg 会写完文件尾再退出。");
+        }
+        else
+        {
+            Toast.Warning("该任务已经不在运行中。");
+        }
+    }
+
+    private async Task ForceCancelAsync(ObjectId taskId)
+    {
+        if (await TaskService.CancelTaskAsync(taskId, graceful: false))
+        {
+            Toast.Warning("已取消任务，未完成的输出文件会被清理。");
+            await RefreshActiveAsync();
+        }
+        else
+        {
+            Toast.Warning("该任务已经结束。");
+        }
+    }
+
+    private async Task RetryAsync(ObjectId taskId)
+    {
+        try
+        {
+            var retry = await TaskService.RetryTaskAsync(taskId);
+            if (retry == null)
+            {
+                Toast.Error("找不到原任务，无法重试。");
+                return;
+            }
+            Toast.Success("已重新加入队列");
+            await RefreshActiveAsync();
+            await LoadRecentAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"重试失败：{ex.Message}");
+        }
+    }
+
+    private async Task OpenOutputFolderAsync(ConversionTask task)
+    {
+        var directory = Path.GetDirectoryName(task.OutputPath);
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+        {
+            Toast.Warning("输出目录不存在，可能已被移动或删除。");
+            return;
+        }
+
+        try
+        {
+            if (AppPaths.IsWindows)
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{directory}\"") { UseShellExecute = true });
+            }
+            else if (AppPaths.IsMacOS)
+            {
+                System.Diagnostics.Process.Start("open", [directory]);
+            }
+            else
+            {
+                System.Diagnostics.Process.Start("xdg-open", [directory]);
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"无法打开目录：{ex.Message}");
+        }
+
+        await Task.CompletedTask;
+    }
+
+    // ── 任务列表与事件 ──────────────────────────────────────────────
+
+    private async Task RefreshActiveAsync()
+    {
+        try
+        {
+            var running = await TaskService.GetRunningTasksAsync();
+            var pending = await TaskService.GetPendingTasksAsync();
+            _activeTasks = running.Concat(pending).OrderByDescending(t => t.CreatedAt).ToList();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"读取任务列表失败：{ex.Message}");
+        }
+    }
+
+    private async Task LoadRecentAsync()
+    {
+        try
+        {
+            _recentTasks = await TaskService.GetTaskHistoryAsync(8);
+        }
+        catch
+        {
+            _recentTasks = [];
         }
     }
 
     private void OnProgressChanged(object? sender, TaskProgressEventArgs e)
     {
-        if (_currentTask?.Id == e.TaskId)
-        {
-            _currentTask.Progress = e.Progress;
-            _currentTask.ProcessingSpeed = e.Speed;
-            _currentTask.EstimatedTimeRemaining = e.Eta;
-            InvokeAsync(StateHasChanged);
-        }
+        var task = _activeTasks.FirstOrDefault(t => t.Id == e.TaskId);
+        if (task == null) return;
+
+        task.Progress = e.Progress;
+        task.ProcessingSpeed = e.Speed;
+        task.EstimatedTimeRemaining = e.Eta;
+        _ = InvokeAsync(StateHasChanged);
     }
 
-    private async void OnStatusChanged(object? sender, TaskStatusEventArgs e)
+    private void OnStatusChanged(object? sender, TaskStatusEventArgs e)
     {
-        if (_currentTask?.Id == e.TaskId)
-        {
-            _currentTask.Status = e.NewStatus;
+        _ = HandleStatusChangedAsync(e);
+    }
 
-            switch (e.NewStatus)
+    private async Task HandleStatusChangedAsync(TaskStatusEventArgs e)
+    {
+        try
+        {
+            var task = await TaskService.GetTaskByIdAsync(e.TaskId);
+            var name = task == null ? "任务" : Path.GetFileName(task.InputPath);
+
+            if (e.NewStatus is TaskStatus.Completed or TaskStatus.Failed or TaskStatus.Cancelled or TaskStatus.Skipped)
             {
-                case Models.TaskStatus.Completed:
-                    _statusMessage = "✅ 转换完成！";
-                    _statusClass = "success";
-                    _isProcessing = false;
-                    break;
-                case Models.TaskStatus.Failed:
-                    _statusMessage = $"❌ 转换失败: {e.ErrorMessage}";
-                    _statusClass = "error";
-                    _isProcessing = false;
-                    break;
-                case Models.TaskStatus.Cancelled:
-                    _statusMessage = "⚠️ 转换已取消";
-                    _statusClass = "warning";
-                    _isProcessing = false;
-                    break;
+                switch (e.NewStatus)
+                {
+                    case TaskStatus.Completed:
+                        Toast.Success($"✅ 转换完成：{name}");
+                        break;
+                    case TaskStatus.Failed:
+                        Toast.Error($"❌ 转换失败：{name} — {e.ErrorMessage}");
+                        break;
+                    case TaskStatus.Cancelled:
+                        Toast.Warning($"已取消：{name}");
+                        break;
+                    case TaskStatus.Skipped:
+                        Toast.Warning($"已跳过：{name}（输出文件已存在）");
+                        break;
+                }
             }
 
-            await LoadRecentTasks();
+            await RefreshActiveAsync();
+            await LoadRecentAsync();
             await InvokeAsync(StateHasChanged);
+        }
+        catch
+        {
+            // 事件回调中的异常不应影响其它订阅者
         }
     }
 
-    private static string FormatTime(double seconds)
+    private void OnLogAppended(object? sender, TaskLogEventArgs e)
     {
-        var ts = TimeSpan.FromSeconds(seconds);
-        return ts.Hours > 0 
-            ? $"{ts.Hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}"
-            : $"{ts.Minutes:D2}:{ts.Seconds:D2}";
+        var key = e.TaskId.ToString();
+        var existing = _liveLogs.TryGetValue(key, out var log) ? log : string.Empty;
+
+        // 内存里只保留最近 800 行，长任务不会把浏览器拖垮
+        var lines = existing.Length == 0 ? 0 : existing.Count(c => c == '\n');
+        if (lines > 800)
+        {
+            var index = existing.IndexOf('\n');
+            existing = index >= 0 ? existing[(index + 1)..] : string.Empty;
+        }
+
+        _liveLogs[key] = existing + e.Line + Environment.NewLine;
+
+        if (_expandedTaskId == e.TaskId)
+        {
+            _ = InvokeAsync(StateHasChanged);
+        }
     }
 
-    private static string GetStatusClass(Models.TaskStatus status) => status switch
+    private string GetLiveLog(ObjectId taskId) =>
+        _liveLogs.TryGetValue(taskId.ToString(), out var log) ? log : string.Empty;
+
+    private async Task ToggleLogAsync(ObjectId taskId)
     {
-        Models.TaskStatus.Completed => "completed",
-        Models.TaskStatus.Failed => "failed",
-        Models.TaskStatus.Running => "running",
-        Models.TaskStatus.Cancelled => "cancelled",
-        _ => "pending"
+        _expandedTaskId = _expandedTaskId == taskId ? null : taskId;
+
+        if (_expandedTaskId != null && !_liveLogs.ContainsKey(taskId.ToString()))
+        {
+            var task = await TaskService.GetTaskByIdAsync(taskId);
+            if (task != null && !string.IsNullOrEmpty(task.LogOutput))
+            {
+                _liveLogs[taskId.ToString()] = task.LogOutput;
+            }
+        }
+    }
+
+    // ── 展示辅助 ────────────────────────────────────────────────────
+
+    private static string StatusText(TaskStatus status) => status switch
+    {
+        TaskStatus.Completed => "已完成",
+        TaskStatus.Failed => "失败",
+        TaskStatus.Running => "运行中",
+        TaskStatus.Cancelled => "已取消",
+        TaskStatus.Skipped => "已跳过",
+        _ => "等待中"
     };
 
-    private static string GetStatusText(Models.TaskStatus status) => status switch
+    private static string StatusBadgeClass(TaskStatus status) => status switch
     {
-        Models.TaskStatus.Completed => "完成",
-        Models.TaskStatus.Failed => "失败",
-        Models.TaskStatus.Running => "运行中",
-        Models.TaskStatus.Cancelled => "已取消",
-        _ => "等待"
+        TaskStatus.Completed => "ffui-badge-success",
+        TaskStatus.Failed => "ffui-badge-danger",
+        TaskStatus.Running => "ffui-badge-info",
+        TaskStatus.Cancelled => "ffui-badge-warning",
+        TaskStatus.Skipped => "ffui-badge-warning",
+        _ => string.Empty
     };
+
+    private static string FormatDuration(double? seconds)
+    {
+        if (seconds is not > 0) return "-";
+        var span = TimeSpan.FromSeconds(seconds.Value);
+        return span.TotalHours >= 1
+            ? $"{(int)span.TotalHours}:{span.Minutes:D2}:{span.Seconds:D2}"
+            : $"{span.Minutes:D2}:{span.Seconds:D2}";
+    }
 
     public void Dispose()
     {
         TaskService.TaskProgressChanged -= OnProgressChanged;
         TaskService.TaskStatusChanged -= OnStatusChanged;
+        TaskService.TaskLogAppended -= OnLogAppended;
     }
 }
-
-<style>
-    .convert-container {
-        max-width: 1200px;
-        margin: 0 auto;
-    }
-
-    h1 {
-        margin-bottom: 1.5rem;
-    }
-
-    .convert-layout {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 2rem;
-        margin-bottom: 2rem;
-    }
-
-    .form-section, .template-section {
-        background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 8px;
-    }
-
-    .form-section h2 {
-        margin-top: 0;
-        margin-bottom: 1rem;
-        font-size: 1.1rem;
-    }
-
-    .form-group {
-        margin-bottom: 1rem;
-    }
-
-    .form-group label {
-        display: block;
-        font-weight: 500;
-        margin-bottom: 0.5rem;
-    }
-
-    .form-group input {
-        width: 100%;
-        padding: 0.75rem;
-        border: 2px solid #ddd;
-        border-radius: 6px;
-        font-size: 0.95rem;
-    }
-
-    .help-text {
-        display: block;
-        font-size: 0.8rem;
-        color: var(--text-muted, #888);
-        margin-top: 0.25rem;
-    }
-
-    .help-text code {
-        background: var(--light-bg, #e9ecef);
-        padding: 0.1rem 0.3rem;
-        border-radius: 3px;
-        font-size: 0.75rem;
-        color: var(--text-primary, #333);
-    }
-
-    .format-help {
-        margin-top: 0.5rem;
-        font-size: 0.85rem;
-    }
-
-    .format-help summary {
-        cursor: pointer;
-        color: var(--primary-color, #007bff);
-        user-select: none;
-    }
-
-    .format-help summary:hover {
-        text-decoration: underline;
-    }
-
-    .format-list {
-        margin-top: 0.5rem;
-        padding: 0.75rem;
-        background: var(--light-bg, #f8f9fa);
-        border-radius: 4px;
-        border: 1px solid var(--border-color, #ddd);
-    }
-
-    .format-item {
-        margin-bottom: 0.4rem;
-        font-size: 0.8rem;
-        color: var(--text-secondary, #666);
-    }
-
-    .format-item:last-child {
-        margin-bottom: 0;
-    }
-
-    .format-item code {
-        background: var(--card-bg, #e9ecef);
-        padding: 0.1rem 0.3rem;
-        border-radius: 3px;
-        font-size: 0.75rem;
-        color: #d63384;
-    }
-
-    .preview-section {
-        background: #e7f1ff;
-        padding: 1rem;
-        border-radius: 8px;
-        margin-bottom: 1.5rem;
-    }
-
-    .preview-section h3 {
-        margin: 0 0 0.75rem 0;
-        font-size: 1rem;
-    }
-
-    .preview-item {
-        display: flex;
-        margin-bottom: 0.5rem;
-    }
-
-    .preview-item .label {
-        width: 60px;
-        color: #666;
-    }
-
-    .preview-item .value {
-        flex: 1;
-        word-break: break-all;
-    }
-
-    .full-command {
-        flex-direction: column;
-    }
-
-    .full-command-container {
-        display: flex;
-        align-items: flex-start;
-        gap: 0.5rem;
-        width: 100%;
-        margin-top: 0.5rem;
-    }
-
-    .full-command-code {
-        flex: 1;
-        background: #f0f0f0;
-        padding: 0.75rem;
-        border-radius: 4px;
-        border: 1px solid #ddd;
-        font-family: 'Consolas', 'Monaco', monospace;
-        font-size: 0.9rem;
-        word-break: break-all;
-        white-space: pre-wrap;
-        line-height: 1.4;
-        margin: 0;
-    }
-
-    .copy-command-btn {
-        padding: 0.4rem 0.6rem;
-        background: #007bff;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 0.9rem;
-        transition: background 0.2s;
-    }
-
-    .copy-command-btn:hover {
-        background: #0056b3;
-    }
-
-    .copy-command-btn:active {
-        background: #004085;
-    }
-
-    .copy-command-btn.copied {
-        background: #28a745;
-    }
-
-    .action-section {
-        display: flex;
-        gap: 1rem;
-        margin-bottom: 2rem;
-    }
-
-    .btn-primary {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 1rem 2rem;
-        background: #007bff;
-        color: white;
-        border: none;
-        border-radius: 8px;
-        font-size: 1rem;
-        cursor: pointer;
-        transition: background 0.2s;
-    }
-
-    .btn-primary:hover:not(:disabled) {
-        background: #0056b3;
-    }
-
-    .btn-primary:disabled {
-        background: #ccc;
-        cursor: not-allowed;
-    }
-
-    .btn-cancel {
-        padding: 1rem 1.5rem;
-        background: #dc3545;
-        color: white;
-        border: none;
-        border-radius: 8px;
-        cursor: pointer;
-    }
-
-    .spinner-small {
-        width: 16px;
-        height: 16px;
-        border: 2px solid rgba(255,255,255,0.3);
-        border-top-color: white;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-    }
-
-    @@keyframes spin {
-        to { transform: rotate(360deg); }
-    }
-
-    .progress-section {
-        margin-bottom: 1.5rem;
-    }
-
-    .log-section {
-        margin-bottom: 1.5rem;
-        height: 300px;
-    }
-
-    .status-message {
-        padding: 1rem;
-        border-radius: 8px;
-        margin-bottom: 1.5rem;
-    }
-
-    .status-message.success {
-        background: #d4edda;
-        color: #155724;
-    }
-
-    .status-message.error {
-        background: #f8d7da;
-        color: #721c24;
-    }
-
-    .status-message.warning {
-        background: #fff3cd;
-        color: #856404;
-    }
-
-    .history-section {
-        background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 8px;
-    }
-
-    .history-section h3 {
-        margin: 0 0 1rem 0;
-    }
-
-    .history-table {
-        width: 100%;
-        border-collapse: collapse;
-    }
-
-    .history-table th,
-    .history-table td {
-        padding: 0.75rem;
-        text-align: left;
-        border-bottom: 1px solid #ddd;
-    }
-
-    .history-table th {
-        background: #e9ecef;
-        font-weight: 500;
-    }
-
-    .status-badge {
-        padding: 0.2rem 0.5rem;
-        border-radius: 4px;
-        font-size: 0.8rem;
-    }
-
-    .status-badge.completed { background: #d4edda; color: #155724; }
-    .status-badge.failed { background: #f8d7da; color: #721c24; }
-    .status-badge.running { background: #cce5ff; color: #004085; }
-    .status-badge.cancelled { background: #fff3cd; color: #856404; }
-    .status-badge.pending { background: #e9ecef; color: #666; }
-
-    @@media (max-width: 900px) {
-        .convert-layout {
-            grid-template-columns: 1fr;
-        }
-    }
-</style>

@@ -1,124 +1,115 @@
-@using FFmpegWebUI.Models
+@*
+    模板卡片（网格 / 列表共用同一套标记，只是布局与命令区块不同）
 
-@if (ViewMode == "list")
-{
-    <div class="template-card-list @(IsSelected ? "selected" : "")">
-        <div class="list-main">
-            <div class="list-header">
-                <span class="card-name">@Template.Name</span>
-                <div class="card-badges">
-                    @if (Template.Type == TemplateType.System)
-                    {
-                        <span class="badge system">预设</span>
-                    }
-                    else
-                    {
-                        <span class="badge user">自定义</span>
-                    }
-                    @if (Template.RequiresHardwareAcceleration)
-                    {
-                        <span class="badge hw">🚀</span>
-                    }
-                </div>
-            </div>
-            <p class="card-desc">@Template.Description</p>
-            <div class="list-command">
-                <div class="command-header-row">
-                    <span class="command-label">FFmpeg 命令参数:</span>
-                    <button class="copy-btn-small @(_copied ? "copied" : "")" @onclick="CopyCommand" @onclick:stopPropagation="true" title="复制命令">
-                        @(_copied ? "✓" : "📋")
-                    </button>
-                </div>
-                <code class="command-code">@Template.CommandArgs</code>
-            </div>
-            <div class="card-meta">
-                <span>📁 .@Template.OutputExtension</span>
-                <span>📂 @Template.Category</span>
-            </div>
-        </div>
-        <div class="list-actions">
-            <button class="btn-icon" title="查看详情" @onclick="OnViewClick">
-                🔍
-            </button>
-            @if (Template.Type == TemplateType.System)
-            {
-                <button class="btn-icon copy" title="复制模板" @onclick="OnCopyClick">
-                    📋
-                </button>
-            }
-            else
-            {
-                <button class="btn-icon" title="编辑" @onclick="OnEditClick">
-                    ✏️
-                </button>
-                <button class="btn-icon delete" title="删除" @onclick="OnDeleteClick">
-                    🗑️
-                </button>
-            }
-            <button class="btn-use" @onclick="OnSelectClick">
-                选择
-            </button>
-        </div>
-    </div>
-}
-else
-{
-    <div class="template-card @(IsSelected ? "selected" : "")">
+    · 复制按钮调用真实的 ffui.copyText，失败会明确提示，不再做「假成功」动画。
+    · 硬件徽标由父组件传入的 IsAvailable / UnavailableReason / SelectedEncoderName 决定，
+      不会再无条件宣称「硬件加速」；不可用时禁用「选择 / 直接使用」。
+*@
+@inject IJSRuntime JS
+@inject IToastService Toast
+@implements IDisposable
+
+<div class="template-card @Layout @(IsSelected ? "selected" : "") @(IsUnavailableAction ? "blocked" : "")">
+    <div class="card-main">
         <div class="card-header">
             <span class="card-name">@Template.Name</span>
             <div class="card-badges">
-                @if (Template.Type == TemplateType.System)
+                @if (ShowSystemBadges)
                 {
-                    <span class="badge system">预设</span>
+                    <span class="ffui-badge @(IsSystem ? "" : "ffui-badge-success")">
+                        @(IsSystem ? "预设" : "自定义")
+                    </span>
                 }
-                else
+
+                @if (ShowHardwareBadge)
                 {
-                    <span class="badge user">自定义</span>
-                }
-                @if (Template.RequiresHardwareAcceleration)
-                {
-                    <span class="badge hw">🚀</span>
+                    @if (IsAvailable == false)
+                    {
+                        <span class="ffui-badge ffui-badge-danger" title="@UnavailableTitle">⚠ 硬件不可用</span>
+                    }
+                    else if (IsAvailable == true)
+                    {
+                        <span class="ffui-badge ffui-badge-success" title="@AvailableTitle">
+                            🚀 @(string.IsNullOrWhiteSpace(SelectedEncoderName) ? "硬件可用" : SelectedEncoderName)
+                        </span>
+                    }
+                    else
+                    {
+                        <span class="ffui-badge" title="尚未检测到本机硬件编码能力">🚀 硬件加速（未检测）</span>
+                    }
                 }
             </div>
         </div>
 
         <p class="card-desc">@Template.Description</p>
 
+        @if (ParameterLabels.Count > 0)
+        {
+            <div class="card-params">
+                <span class="params-label">⚙ 可调参数（@ParameterLabels.Count）</span>
+                <span class="params-list">@ParameterLabelsText</span>
+            </div>
+        }
+
         <div class="card-meta">
             <span>📁 .@Template.OutputExtension</span>
             <span>📂 @Template.Category</span>
         </div>
 
-        <div class="card-actions">
-            <button class="btn-icon" title="查看详情" @onclick="OnViewClick">
-                🔍
-            </button>
-            @if (Template.Type == TemplateType.System)
-            {
-                <button class="btn-icon copy" title="复制模板" @onclick="OnCopyClick">
-                    📋
-                </button>
-            }
-            else
-            {
-                <button class="btn-icon" title="编辑" @onclick="OnEditClick">
-                    ✏️
-                </button>
-                <button class="btn-icon delete" title="删除" @onclick="OnDeleteClick">
-                    🗑️
-                </button>
-            }
-            <button class="btn-use" @onclick="OnSelectClick">
-                选择
-            </button>
-        </div>
+        @if (Layout == "list")
+        {
+            <div class="card-command">
+                <div class="command-header-row">
+                    <span class="command-label">FFmpeg 命令参数:</span>
+                    <button type="button" class="ffui-icon-btn copy" aria-label="@CopyAriaLabel"
+                            title="复制命令参数" @onclick="CopyCommandAsync">
+                        <span aria-hidden="true">@(_copied ? "✓" : "📋")</span>
+                    </button>
+                </div>
+                <code class="command-code">@Template.CommandArgs</code>
+            </div>
+        }
     </div>
-}
+
+    <div class="card-actions">
+        <button type="button" class="ffui-icon-btn" aria-label="查看模板详情" title="查看详情" @onclick="OnViewClick">🔍</button>
+
+        @if (Layout == "grid")
+        {
+            <button type="button" class="ffui-icon-btn copy" aria-label="@CopyAriaLabel"
+                    title="复制命令参数" @onclick="CopyCommandAsync">
+                <span aria-hidden="true">@(_copied ? "✓" : "📋")</span>
+            </button>
+        }
+
+        @if (IsSystem)
+        {
+            <button type="button" class="ffui-icon-btn" aria-label="复制为自定义模板"
+                    title="复制为自定义模板" @onclick="OnCopyClick">📑</button>
+        }
+        else
+        {
+            <button type="button" class="ffui-icon-btn" aria-label="编辑模板" title="编辑" @onclick="OnEditClick">✏️</button>
+            <button type="button" class="ffui-icon-btn delete" aria-label="删除模板" title="删除" @onclick="OnDeleteClick">🗑️</button>
+        }
+
+        <button type="button" class="ffui-btn ffui-btn-primary ffui-btn-sm use-btn"
+                disabled="@IsUnavailableAction"
+                title="@(IsUnavailableAction ? UnavailableTitle : null)"
+                @onclick="OnSelectClick">
+            @(IsSystem ? "直接使用" : "选择")
+        </button>
+    </div>
+
+    <span class="visually-hidden" role="status" aria-live="polite">@_copyStatus</span>
+</div>
 
 @code {
+    // ── 参数 ────────────────────────────────────────────────────────────
     [Parameter, EditorRequired]
     public CommandTemplate Template { get; set; } = default!;
 
+    /// <summary>布局："grid"（默认）或 "list"</summary>
     [Parameter]
     public string ViewMode { get; set; } = "grid";
 
@@ -140,254 +131,320 @@ else
     [Parameter]
     public EventCallback<CommandTemplate> OnCopy { get; set; }
 
-    private bool _copied;
+    /// <summary>硬件可用性：true 可用 / false 不可用 / null 未知（未检测）</summary>
+    [Parameter]
+    public bool? IsAvailable { get; set; }
 
-    private async Task CopyCommand()
+    /// <summary>不可用原因（显示在提示中）</summary>
+    [Parameter]
+    public string? UnavailableReason { get; set; }
+
+    /// <summary>实际会使用的编码器名（IsAvailable == true 时显示）</summary>
+    [Parameter]
+    public string? SelectedEncoderName { get; set; }
+
+    /// <summary>是否显示「预设 / 自定义」徽标</summary>
+    [Parameter]
+    public bool ShowSystemBadges { get; set; } = true;
+
+    // ── 状态 ────────────────────────────────────────────────────────────
+    private bool _copied;
+    private string _copyStatus = string.Empty;
+    private bool _disposed;
+
+    private string Layout => string.Equals(ViewMode, "list", StringComparison.OrdinalIgnoreCase) ? "list" : "grid";
+
+    private bool IsSystem => Template.Type == TemplateType.System;
+
+    private bool IsUnavailableAction => IsAvailable == false;
+
+    private string DefaultUnavailableReason => "本机缺少该模板所需的硬件编码器";
+
+    private string UnavailableTitle => string.IsNullOrWhiteSpace(UnavailableReason) ? DefaultUnavailableReason : UnavailableReason;
+
+    private string AvailableTitle => string.IsNullOrWhiteSpace(SelectedEncoderName)
+        ? "本机已检测到该模板可用的硬件编码器"
+        : $"将使用 {SelectedEncoderName} 硬件编码";
+
+    private bool ShowHardwareBadge =>
+        Template.HardwareMode != HardwareAccelerationMode.None ||
+        Template.RequiresHardwareAcceleration ||
+        IsAvailable.HasValue;
+
+    private string CopyAriaLabel => _copied ? "命令参数已复制" : "复制命令参数";
+
+    private List<string> ParameterLabels => (Template.Parameters ?? [])
+        .Where(p => p != null && (!string.IsNullOrWhiteSpace(p.Label) || !string.IsNullOrWhiteSpace(p.Name)))
+        .Select(p => string.IsNullOrWhiteSpace(p.Label) ? p.Name : p.Label)
+        .ToList();
+
+    private string ParameterLabelsText
     {
-        _copied = true;
-        StateHasChanged();
-        await Task.Delay(2000);
-        _copied = false;
-        StateHasChanged();
+        get
+        {
+            var labels = ParameterLabels;
+            if (labels.Count == 0) return string.Empty;
+
+            var head = string.Join("、", labels.Take(3));
+            return labels.Count > 3 ? $"{head} 等 {labels.Count} 项" : head;
+        }
     }
 
+    public void Dispose()
+    {
+        _disposed = true;
+        _copied = false;
+        _copyStatus = string.Empty;
+    }
+
+    // ── 交互 ────────────────────────────────────────────────────────────
     private async Task OnSelectClick()
     {
-        await OnSelect.InvokeAsync(Template);
+        if (IsUnavailableAction)
+        {
+            Toast.Warning(UnavailableTitle);
+            return;
+        }
+
+        await InvokeSafelyAsync(OnSelect, IsSystem ? "使用模板" : "选择模板");
     }
 
-    private async Task OnEditClick()
+    private async Task OnEditClick() => await InvokeSafelyAsync(OnEdit, "编辑模板");
+
+    private async Task OnDeleteClick() => await InvokeSafelyAsync(OnDelete, "删除模板");
+
+    private async Task OnViewClick() => await InvokeSafelyAsync(OnView, "查看详情");
+
+    private async Task OnCopyClick() => await InvokeSafelyAsync(OnCopy, "复制模板");
+
+    private async Task InvokeSafelyAsync(EventCallback<CommandTemplate> callback, string action)
     {
-        await OnEdit.InvokeAsync(Template);
+        if (!callback.HasDelegate)
+        {
+            Toast.Warning($"{action}功能不可用：父组件未提供对应回调");
+            return;
+        }
+
+        try
+        {
+            await callback.InvokeAsync(Template);
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"{action}失败：{ex.Message}");
+        }
     }
 
-    private async Task OnDeleteClick()
+    private async Task CopyCommandAsync()
     {
-        await OnDelete.InvokeAsync(Template);
+        var text = Template.CommandArgs ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            Toast.Warning("该模板没有可复制的命令参数");
+            return;
+        }
+
+        bool copied;
+        try
+        {
+            copied = await JS.InvokeAsync<bool>("ffui.copyText", text);
+        }
+        catch (Exception ex)
+        {
+            _copyStatus = "复制失败";
+            Toast.Error($"复制失败：{ex.Message}");
+            return;
+        }
+
+        if (!copied)
+        {
+            _copyStatus = "复制失败";
+            Toast.Error("复制失败：浏览器拒绝了剪贴板访问，请手动选择命令文本");
+            return;
+        }
+
+        Toast.Success("命令参数已复制到剪贴板");
+        await ShowCopiedAsync();
     }
 
-    private async Task OnViewClick()
+    private async Task ShowCopiedAsync()
     {
-        await OnView.InvokeAsync(Template);
-    }
+        _copied = true;
+        _copyStatus = "命令参数已复制";
+        await InvokeAsync(StateHasChanged);
 
-    private async Task OnCopyClick()
-    {
-        await OnCopy.InvokeAsync(Template);
+        await Task.Delay(2000);
+
+        // 组件可能在等待期间被销毁，此时再触发渲染会抛 ObjectDisposedException
+        if (_disposed) return;
+
+        _copied = false;
+        _copyStatus = string.Empty;
+        await InvokeAsync(StateHasChanged);
     }
 }
 
 <style>
-    /* 网格模式卡片样式 */
     .template-card {
-        background: var(--card-bg, white);
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 8px;
-        padding: 1rem;
-        transition: box-shadow 0.2s, border-color 0.2s;
-        color: var(--text-primary, #333);
+        display: flex;
+        gap: var(--spacing-4);
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-4);
+        color: var(--text-primary);
+        transition: box-shadow 0.2s ease, border-color 0.2s ease;
+    }
+
+    .template-card.grid {
+        flex-direction: column;
+    }
+
+    .template-card.list {
+        flex-direction: row;
+        align-items: flex-start;
     }
 
     .template-card:hover {
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        box-shadow: var(--shadow-md);
     }
 
     .template-card.selected {
-        border-color: #007bff;
-        box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.2);
+        border-color: var(--primary-color);
+        box-shadow: var(--focus-ring);
     }
 
-    /* 列表模式卡片样式 */
-    .template-card-list {
-        background: var(--card-bg, white);
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 8px;
-        padding: 1rem;
-        display: flex;
-        gap: 1rem;
-        transition: box-shadow 0.2s, border-color 0.2s;
-        color: var(--text-primary, #333);
+    .template-card.blocked {
+        border-color: var(--warning-color);
     }
 
-    .template-card-list:hover {
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-    }
-
-    .template-card-list.selected {
-        border-color: #007bff;
-        box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.2);
-    }
-
-    .list-main {
+    .card-main {
         flex: 1;
         min-width: 0;
-    }
-
-    .list-header {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        margin-bottom: 0.35rem;
-    }
-
-    .list-command {
         display: flex;
         flex-direction: column;
-        gap: 0.35rem;
-        margin: 0.5rem 0;
-        padding: 0.5rem 0.75rem;
-        background: var(--input-bg, #f5f5f5);
-        border-radius: 4px;
-        border: 1px solid var(--border-color, #eee);
-    }
-
-    .command-header-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
-
-    .command-label {
-        font-size: 0.75rem;
-        color: var(--text-secondary, #666);
-        white-space: nowrap;
-        flex-shrink: 0;
-    }
-
-    .copy-btn-small {
-        padding: 0.15rem 0.4rem;
-        background: #007bff;
-        color: white;
-        border: none;
-        border-radius: 3px;
-        font-size: 0.7rem;
-        cursor: pointer;
-        transition: all 0.2s;
-        line-height: 1;
-    }
-
-    .copy-btn-small:hover {
-        background: #0056b3;
-    }
-
-    .copy-btn-small.copied {
-        background: #28a745;
-    }
-
-    .command-code {
-        font-family: 'Consolas', 'Monaco', monospace;
-        font-size: 0.8rem;
-        color: var(--text-primary, #333);
-        word-break: break-all;
-        line-height: 1.4;
-    }
-
-    .list-actions {
-        display: flex;
-        flex-direction: row;
-        gap: 0.35rem;
-        align-items: center;
-        justify-content: flex-end;
-        flex-shrink: 0;
+        gap: var(--spacing-2);
     }
 
     .card-header {
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
-        gap: 0.5rem;
-        margin-bottom: 0.5rem;
+        gap: var(--spacing-2);
     }
 
     .card-name {
         font-weight: 600;
         font-size: 1rem;
-        color: var(--text-primary, #333);
+        word-break: break-word;
     }
 
     .card-badges {
         display: flex;
-        gap: 0.25rem;
-    }
-
-    .badge {
-        padding: 0.1rem 0.4rem;
-        border-radius: 3px;
-        font-size: 0.7rem;
-    }
-
-    .badge.system {
-        background: #e9ecef;
-        color: #495057;
-    }
-
-    .badge.user {
-        background: #d4edda;
-        color: #155724;
-    }
-
-    .badge.hw {
-        background: #cce5ff;
-        color: #004085;
+        gap: var(--spacing-1);
+        flex-wrap: wrap;
+        justify-content: flex-end;
     }
 
     .card-desc {
-        margin: 0 0 0.75rem 0;
+        margin: 0;
         font-size: 0.85rem;
-        color: var(--text-secondary, #666);
+        color: var(--text-secondary);
         line-height: 1.4;
+    }
+
+    .card-params {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-2);
+        font-size: 0.8rem;
+        color: var(--text-muted);
+    }
+
+    .params-label {
+        color: var(--text-secondary);
+        white-space: nowrap;
     }
 
     .card-meta {
         display: flex;
-        gap: 1rem;
+        flex-wrap: wrap;
+        gap: var(--spacing-4);
         font-size: 0.8rem;
-        color: var(--text-muted, #888);
-        margin-bottom: 0.75rem;
+        color: var(--text-muted);
+    }
+
+    .card-command {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+        margin-top: var(--spacing-1);
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--code-bg);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+    }
+
+    .command-header-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-2);
+    }
+
+    .command-label {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        white-space: nowrap;
+    }
+
+    .command-code {
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        line-height: 1.4;
+        color: var(--text-primary);
+        word-break: break-all;
     }
 
     .card-actions {
         display: flex;
-        gap: 0.5rem;
-        justify-content: flex-end;
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: var(--spacing-1);
         align-items: center;
+        justify-content: flex-end;
     }
 
-    .btn-icon {
-        background: none;
-        border: none;
-        cursor: pointer;
-        padding: 0.25rem;
-        font-size: 1rem;
-        opacity: 0.6;
-        transition: opacity 0.2s;
+    .template-card.grid .card-actions {
+        border-top: 1px solid var(--border-color);
+        padding-top: var(--spacing-2);
     }
 
-    .btn-icon:hover {
-        opacity: 1;
+    .template-card.list .card-actions {
+        flex-shrink: 0;
     }
 
-    .btn-icon.delete:hover {
-        opacity: 1;
-        color: #dc3545;
+    .ffui-icon-btn.copy:hover:not(:disabled) {
+        color: var(--success-color);
     }
 
-    .btn-icon.copy:hover {
-        opacity: 1;
-        color: #28a745;
+    .ffui-icon-btn.delete:hover:not(:disabled) {
+        color: var(--danger-color);
     }
 
-    .btn-use {
-        padding: 0.4rem 0.8rem;
-        background: #007bff;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        font-size: 0.85rem;
-        cursor: pointer;
+    .use-btn {
+        white-space: nowrap;
     }
 
-    .btn-use:hover {
-        background: #0056b3;
+    .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
     }
 </style>

@@ -1,22 +1,26 @@
-using System.Diagnostics;
-using System.Text;
+using System.Text.RegularExpressions;
 
 namespace FFmpegWebUI.Services;
 
 /// <summary>文件服务实现</summary>
-public class FileService : IFileService
+public sealed partial class FileService : IFileService
 {
     private static readonly HashSet<string> DefaultMediaExtensions =
     [
-        ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v",
-        ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"
+        ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".ts", ".mpg", ".mpeg", ".3gp", ".ogv",
+        ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a", ".opus", ".aiff",
+        ".gif", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"
     ];
+
+    public IReadOnlyCollection<string> SupportedMediaExtensions => DefaultMediaExtensions;
 
     public bool IsFileAccessible(string path)
     {
         try
         {
-            return File.Exists(path) && new FileInfo(path).Length > 0;
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            var expanded = AppPaths.ToAbsolute(path);
+            return File.Exists(expanded) && new FileInfo(expanded).Length > 0;
         }
         catch
         {
@@ -24,35 +28,25 @@ public class FileService : IFileService
         }
     }
 
-    public bool IsDirectoryWritable(string path)
-    {
-        try
-        {
-            if (!Directory.Exists(path))
-            {
-                Directory.CreateDirectory(path);
-            }
-
-            var testFile = Path.Combine(path, $".write_test_{Guid.NewGuid()}");
-            File.WriteAllText(testFile, "test");
-            File.Delete(testFile);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
+    public bool IsDirectoryWritable(string path) => OutputPathResolver.IsOutputPathWritable(Path.Combine(path, "probe.tmp"));
 
     public long GetAvailableDiskSpace(string path)
     {
         try
         {
-            var root = Path.GetPathRoot(path);
+            var target = AppPaths.ToAbsolute(path);
+            // DriveInfo 在部分平台上需要已存在的路径，尽量向上找到一个存在的目录
+            while (!string.IsNullOrEmpty(target) && !Directory.Exists(target))
+            {
+                var parent = Path.GetDirectoryName(target);
+                if (string.IsNullOrEmpty(parent) || parent == target) break;
+                target = parent;
+            }
+
+            var root = Path.GetPathRoot(target);
             if (string.IsNullOrEmpty(root)) return 0;
 
-            var driveInfo = new DriveInfo(root);
-            return driveInfo.AvailableFreeSpace;
+            return new DriveInfo(root).AvailableFreeSpace;
         }
         catch
         {
@@ -63,11 +57,29 @@ public class FileService : IFileService
     public string GenerateOutputPath(string inputPath, string outputDirectory, string extension, string? suffix = null)
     {
         var fileName = Path.GetFileNameWithoutExtension(inputPath);
+        var ext = NormalizeExtension(extension);
         var outputFileName = string.IsNullOrEmpty(suffix)
-            ? $"{fileName}.{extension.TrimStart('.')}"
-            : $"{fileName}{suffix}.{extension.TrimStart('.')}";
-
+            ? $"{fileName}.{ext}"
+            : $"{fileName}{suffix}.{ext}";
         return Path.Combine(outputDirectory, outputFileName);
+    }
+
+    public string GenerateUniqueOutputPath(string inputPath, string outputDirectory, string extension, string? suffix = null)
+    {
+        var candidate = GenerateOutputPath(inputPath, outputDirectory, extension, suffix);
+        if (!File.Exists(candidate)) return candidate;
+
+        var directory = Path.GetDirectoryName(candidate) ?? outputDirectory;
+        var name = Path.GetFileNameWithoutExtension(candidate);
+        var ext = Path.GetExtension(candidate);
+
+        for (var i = 1; i < 10000; i++)
+        {
+            var next = Path.Combine(directory, $"{name} ({i}){ext}");
+            if (!File.Exists(next)) return next;
+        }
+
+        return Path.Combine(directory, $"{name}_{DateTime.Now:yyyyMMddHHmmss}{ext}");
     }
 
     public string FormatFileName(string template, string inputPath, string extension)
@@ -80,21 +92,19 @@ public class FileService : IFileService
         var now = DateTime.Now;
         var baseFileName = Path.GetFileNameWithoutExtension(inputPath);
         var inputExt = Path.GetExtension(inputPath).TrimStart('.');
-        var inputDir = Path.GetDirectoryName(inputPath) ?? "";
-        var inputDirName = new DirectoryInfo(inputDir).Name;
+        var inputDir = Path.GetDirectoryName(inputPath) ?? string.Empty;
+        var inputDirName = string.IsNullOrEmpty(inputDir) ? string.Empty : new DirectoryInfo(inputDir).Name;
+        var outputExt = NormalizeExtension(extension);
 
         var result = template;
-
-        // 基本占位符替换
         result = result.Replace("{filename}", baseFileName, StringComparison.OrdinalIgnoreCase);
         result = result.Replace("{ext}", inputExt, StringComparison.OrdinalIgnoreCase);
-        result = result.Replace("{outputext}", extension.TrimStart('.'), StringComparison.OrdinalIgnoreCase);
+        result = result.Replace("{outputext}", outputExt, StringComparison.OrdinalIgnoreCase);
         result = result.Replace("{dir}", inputDirName, StringComparison.OrdinalIgnoreCase);
-        
-        // 日期时间占位符（简单格式）
+
+        result = result.Replace("{datetime}", now.ToString("yyyyMMdd_HHmmss"), StringComparison.OrdinalIgnoreCase);
         result = result.Replace("{date}", now.ToString("yyyyMMdd"), StringComparison.OrdinalIgnoreCase);
         result = result.Replace("{time}", now.ToString("HHmmss"), StringComparison.OrdinalIgnoreCase);
-        result = result.Replace("{datetime}", now.ToString("yyyyMMdd_HHmmss"), StringComparison.OrdinalIgnoreCase);
         result = result.Replace("{year}", now.ToString("yyyy"), StringComparison.OrdinalIgnoreCase);
         result = result.Replace("{month}", now.ToString("MM"), StringComparison.OrdinalIgnoreCase);
         result = result.Replace("{day}", now.ToString("dd"), StringComparison.OrdinalIgnoreCase);
@@ -102,71 +112,86 @@ public class FileService : IFileService
         result = result.Replace("{minute}", now.ToString("mm"), StringComparison.OrdinalIgnoreCase);
         result = result.Replace("{second}", now.ToString("ss"), StringComparison.OrdinalIgnoreCase);
 
-        // 支持自定义日期格式 {now:format}
-        result = System.Text.RegularExpressions.Regex.Replace(
-            result,
-            @"\{now:([^}]+)\}",
-            m => {
-                try
-                {
-                    return now.ToString(m.Groups[1].Value);
-                }
-                catch
-                {
-                    return m.Value; // 格式无效时保留原文
-                }
-            },
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        result = NowFormatRegex().Replace(result, m =>
+        {
+            try
+            {
+                return now.ToString(m.Groups[1].Value);
+            }
+            catch
+            {
+                return m.Value;
+            }
+        });
 
-        // 随机字符串 {random:N} 生成N位随机字符
-        result = System.Text.RegularExpressions.Regex.Replace(
-            result,
-            @"\{random:(\d+)\}",
-            m => {
-                var length = int.Parse(m.Groups[1].Value);
-                length = Math.Min(length, 32); // 最多32位
-                return Guid.NewGuid().ToString("N")[..length];
-            },
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-        // 简单的 {random} 生成8位随机字符
+        result = RandomLengthRegex().Replace(result, m =>
+        {
+            if (!int.TryParse(m.Groups[1].Value, out var length)) return Guid.NewGuid().ToString("N")[..8];
+            length = Math.Clamp(length, 1, 32);
+            return Guid.NewGuid().ToString("N")[..length];
+        });
         result = result.Replace("{random}", Guid.NewGuid().ToString("N")[..8], StringComparison.OrdinalIgnoreCase);
 
-        // 计数器占位符 {counter:N} 用零填充的数字（需要外部维护计数器，这里用时间戳后几位代替）
-        result = System.Text.RegularExpressions.Regex.Replace(
-            result,
-            @"\{counter:(\d+)\}",
-            m => {
-                var digits = int.Parse(m.Groups[1].Value);
-                digits = Math.Min(digits, 10);
-                var counter = now.Ticks % (long)Math.Pow(10, digits);
-                return counter.ToString().PadLeft(digits, '0');
-            },
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-        // 清理非法文件名字符
-        foreach (var c in Path.GetInvalidFileNameChars())
+        result = CounterRegex().Replace(result, m =>
         {
-            result = result.Replace(c, '_');
+            if (!int.TryParse(m.Groups[1].Value, out var digits)) return "0";
+            digits = Math.Clamp(digits, 1, 10);
+            var counter = now.Ticks % (long)Math.Pow(10, digits);
+            return counter.ToString().PadLeft(digits, '0');
+        });
+
+        return SanitizeFileName(result);
+    }
+
+    /// <summary>去掉文件系统不允许的字符，并处理 Windows 保留名</summary>
+    public static string SanitizeFileName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return name;
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new System.Text.StringBuilder(name.Length);
+        foreach (var c in name)
+        {
+            builder.Append(invalid.Contains(c) ? '_' : c);
         }
 
-        return result;
+        var result = builder.ToString().Trim().TrimEnd('.', ' ');
+
+        // Windows 保留设备名
+        if (AppPaths.IsWindows)
+        {
+            var reserved = new[] { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+                "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" };
+            if (reserved.Contains(result, StringComparer.OrdinalIgnoreCase)) result = "_" + result;
+        }
+
+        return string.IsNullOrEmpty(result) ? "output" : result;
     }
 
     public List<string> ScanMediaFiles(string directory, List<string>? extensions = null, bool recursive = false)
     {
-        var targetExtensions = extensions?.Select(e => e.StartsWith('.') ? e : $".{e}").ToHashSet(StringComparer.OrdinalIgnoreCase)
-            ?? DefaultMediaExtensions;
+        var targetExtensions = extensions is { Count: > 0 }
+            ? extensions.Select(e => e.StartsWith('.') ? e : $".{e}").ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : DefaultMediaExtensions.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // 未指定扩展名时按「所有媒体格式」处理
+        if (extensions is { Count: 0 }) targetExtensions = DefaultMediaExtensions.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         try
         {
+            if (!Directory.Exists(directory)) return [];
+
             var searchOption = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-            return Directory.GetFiles(directory, "*.*", searchOption)
+            return Directory.EnumerateFiles(directory, "*.*", searchOption)
                 .Where(f => targetExtensions.Contains(Path.GetExtension(f)))
-                .OrderBy(f => f)
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
-        catch
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+        catch (Exception)
         {
             return [];
         }
@@ -176,7 +201,7 @@ public class FileService : IFileService
     {
         try
         {
-            return new FileInfo(path).Length;
+            return File.Exists(path) ? new FileInfo(path).Length : 0;
         }
         catch
         {
@@ -186,91 +211,46 @@ public class FileService : IFileService
 
     public void EnsureDirectoryExists(string path)
     {
-        var directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-    }
-
-    public async Task<string?> OpenFileDialogAsync(string title = "选择文件", string? filter = null, string? initialDirectory = null)
-    {
-        // 使用 PowerShell 打开 Windows 文件选择对话框
-        var filterString = filter ?? "媒体文件|*.mp4;*.avi;*.mkv;*.mov;*.wmv;*.flv;*.webm;*.m4v;*.mp3;*.wav;*.flac;*.aac;*.ogg|所有文件|*.*";
-        var initialDir = initialDirectory ?? Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
-        
-        var script = $@"
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Title = '{title.Replace("'", "''")}'
-$dialog.Filter = '{filterString.Replace("'", "''")}'
-$dialog.InitialDirectory = '{initialDir.Replace("'", "''")}'
-$dialog.CheckFileExists = $true
-$dialog.CheckPathExists = $true
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
-    Write-Output $dialog.FileName
-}}
-";
-        
-        return await RunPowerShellDialogAsync(script);
-    }
-
-    public async Task<string?> OpenFolderDialogAsync(string title = "选择文件夹", string? initialDirectory = null)
-    {
-        // 使用 PowerShell 打开 Windows 文件夹选择对话框
-        var initialDir = initialDirectory ?? Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
-        
-        var script = $@"
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = '{title.Replace("'", "''")}'
-$dialog.SelectedPath = '{initialDir.Replace("'", "''")}'
-$dialog.ShowNewFolderButton = $true
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
-    Write-Output $dialog.SelectedPath
-}}
-";
-        
-        return await RunPowerShellDialogAsync(script);
-    }
-
-    private static async Task<string?> RunPowerShellDialogAsync(string script)
-    {
         try
         {
-            // 在脚本开头设置 UTF-8 编码
-            var fullScript = $@"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
-{script}
-";
-            using var process = new Process
+            var directory = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -NonInteractive -Command \"{fullScript.Replace("\"", "\\\"")}\"",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    StandardOutputEncoding = Encoding.UTF8,
-                    StandardErrorEncoding = Encoding.UTF8
-                }
-            };
-
-            process.Start();
-            
-            var output = await process.StandardOutput.ReadToEndAsync();
-            await process.WaitForExitAsync();
-            
-            var result = output.Trim();
-            return string.IsNullOrEmpty(result) ? null : result;
+                Directory.CreateDirectory(directory);
+            }
         }
         catch
         {
-            return null;
+            // 目录创建失败时交由后续的可写性检查给出明确提示
         }
     }
+
+    public string FormatFileSize(long bytes)
+    {
+        if (bytes <= 0) return "0 B";
+        string[] sizes = ["B", "KB", "MB", "GB", "TB", "PB"];
+        double length = bytes;
+        var order = 0;
+        while (length >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            length /= 1024;
+        }
+        return $"{length:0.##} {sizes[order]}";
+    }
+
+    private static string NormalizeExtension(string? extension)
+    {
+        if (string.IsNullOrWhiteSpace(extension)) return "mp4";
+        return extension.Trim().TrimStart('.');
+    }
+
+    [GeneratedRegex(@"\{now:([^}]+)\}", RegexOptions.IgnoreCase)]
+    private static partial Regex NowFormatRegex();
+
+    [GeneratedRegex(@"\{random:(\d+)\}", RegexOptions.IgnoreCase)]
+    private static partial Regex RandomLengthRegex();
+
+    [GeneratedRegex(@"\{counter:(\d+)\}", RegexOptions.IgnoreCase)]
+    private static partial Regex CounterRegex();
 }

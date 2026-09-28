@@ -1,243 +1,1983 @@
+@using System.Text
+@using LiteDB
 @using FFmpegWebUI.Models
 @using FFmpegWebUI.Services
 @inject ITemplateService TemplateService
+@inject IFFmpegService FFmpeg
+@inject IHardwareDetectionService HardwareDetection
+@inject IToastService Toast
+@inject IJSRuntime JS
 
-<div class="template-editor @(_isVisible ? "visible" : "")">
-    <div class="editor-overlay" @onclick="Close"></div>
-    <div class="editor-panel">
-        <div class="editor-header">
-            <h2>@(_isEditing ? "编辑模板" : "创建模板")</h2>
-            <button class="close-btn" @onclick="Close">✕</button>
+@*
+    模板编辑器（新建 / 编辑模板与系统预设）。
+
+    设计要点：
+    - 一律在 _draft（深拷贝）上编辑，绝不修改 Template 参数；
+    - 校验、命令预览、占位符使用情况全部来自服务层
+      （ITemplateService.Validate / IFFmpegService.BuildCommand / CommandLineBuilder.ExtractPlaceholders），
+      界面里不重复实现一套“近似校验”；
+    - 关闭有未保存修改时用 ConfirmDialog 二次确认，不静默丢弃；
+    - 试运行会真的在本机跑一次 FFmpeg，作者可以在保存前确认模板可用。
+
+    Modal 只有一个渲染片段（隐式 ChildContent），因此底部按钮栏是内容里的最后一个元素。
+*@
+
+<Modal IsOpen="IsOpen" IsOpenChanged="OnModalIsOpenChanged" Title="@Title" Size="xl"
+       DisableClose="@(_isSaving || _isTesting)">
+
+    <div class="te-badges">
+        <span class="ffui-badge @(IsSystem ? "ffui-badge-primary" : "ffui-badge-info")">
+            @(IsSystem ? "系统预设" : "用户模板")
+        </span>
+        <span class="ffui-badge">@(_isNew ? "新建" : "编辑")</span>
+    </div>
+
+    @if (_isLoading)
+    {
+        <div class="ffui-loading-row">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>正在读取分类与硬件编码器状态…</span>
         </div>
+    }
 
-        <div class="editor-body">
-            <div class="form-group @(HasError("Name") ? "has-error" : "")">
-                <label>模板名称 *</label>
-                <input type="text" @bind="_template.Name" @ref="_nameInput" placeholder="输入模板名称" />
-                @if (HasError("Name"))
-                {
-                    <span class="field-error">@GetError("Name")</span>
-                }
+    @if (!string.IsNullOrEmpty(_loadError))
+    {
+        <div class="ffui-alert ffui-alert-warning" role="status">
+            <span aria-hidden="true">⚠️</span>
+            <span>辅助信息加载失败：@_loadError（不影响手动填写与保存）</span>
+        </div>
+    }
+
+    @if (IsSystem)
+    {
+        <div class="ffui-alert ffui-alert-info" role="note">
+            <span aria-hidden="true">ℹ️</span>
+            <span>系统预设可以编辑，但应用升级时同名预设会被内置内容覆盖（按预设版本同步）。需要长期保留修改，请改完后复制成普通模板。</span>
+        </div>
+    }
+
+    @* ── 基本信息 ─────────────────────────────────────────────── *@
+    <section class="te-section">
+        <h3 class="ffui-section-title">基本信息</h3>
+
+        <div class="te-grid">
+            <div class="te-field">
+                <label for="te-name">模板名称 <span class="te-req" aria-hidden="true">*</span></label>
+                <input id="te-name" type="text" value="@_draft.Name" @oninput="OnNameInput" @onblur="NormalizeName"
+                       placeholder="例如：压缩 · 均衡（CRF 23）" />
             </div>
 
-            <div class="form-group">
-                <label>描述</label>
-                <textarea @bind="_template.Description" placeholder="输入模板描述" rows="2"></textarea>
-            </div>
-
-            <div class="form-group @(HasError("Category") ? "has-error" : "")">
-                <label>分类 *</label>
-                <input type="text" @bind="_template.Category" @ref="_categoryInput" placeholder="如：视频转码、音频提取" list="categories" />
-                <datalist id="categories">
-                    @foreach (var cat in _existingCategories)
+            <div class="te-field">
+                <label for="te-category">分类</label>
+                <input id="te-category" type="text" list="ffui-template-editor-categories"
+                       value="@_draft.Category" @onchange="OnCategoryChanged"
+                       placeholder="选择已有分类，或直接输入新分类" />
+                <datalist id="ffui-template-editor-categories">
+                    @foreach (var category in _existingCategories)
                     {
-                        <option value="@cat" />
+                        <option value="@category"></option>
                     }
                 </datalist>
-                @if (HasError("Category"))
-                {
-                    <span class="field-error">@GetError("Category")</span>
-                }
+                <span class="te-hint">留空会保存为「未分类」。</span>
             </div>
+        </div>
 
-            <div class="form-group @(HasError("CommandArgs") ? "has-error" : "")">
-                <label>FFmpeg 命令参数 *</label>
-                <textarea @bind="_template.CommandArgs" @ref="_commandArgsInput" placeholder="-i &quot;{input}&quot; -c:v libx264 -crf 23 &quot;{output}&quot;" rows="4"></textarea>
-                <span class="help-text">
-                    可用占位符：{"{input}"} 输入文件, {"{output}"} 输出文件, {"{encoder}"} 编码器
+        @if (DuplicateName is { } duplicate)
+        {
+            <div class="ffui-alert ffui-alert-warning" role="status">
+                <span aria-hidden="true">⚠️</span>
+                <span>
+                    已经有同名模板「@duplicate.Name」（@(duplicate.Type == TemplateType.System ? "系统预设" : "用户模板")）。
+                    保存时服务会自动改名（追加序号）；如果这是有意覆盖同名模板，请忽略这条提示。
                 </span>
-                @if (HasError("CommandArgs"))
-                {
-                    <span class="field-error">@GetError("CommandArgs")</span>
-                }
+            </div>
+        }
+
+        <div class="te-field">
+            <label for="te-description">描述</label>
+            <textarea id="te-description" rows="2" value="@_draft.Description" @onchange="OnDescriptionChanged"
+                      placeholder="一句话说明这个模板做什么、什么场景用"></textarea>
+        </div>
+
+        <div class="te-grid">
+            <div class="te-field">
+                <label for="te-extension">输出扩展名 <span class="te-req" aria-hidden="true">*</span></label>
+                <input id="te-extension" type="text" value="@_draft.OutputExtension" @oninput="OnExtensionInput"
+                       @onblur="NormalizeExtensionField" placeholder="mp4" />
+                <span class="te-hint">不需要写点号，会自动转成小写（mp4 / mkv / mp3 …）。</span>
             </div>
 
-            <div class="form-row">
-                <div class="form-group half @(HasError("OutputExtension") ? "has-error" : "")">
-                    <label>输出扩展名 *</label>
-                    <input type="text" @bind="_template.OutputExtension" @ref="_outputExtInput" placeholder="如：mp4" />
-                    @if (HasError("OutputExtension"))
+            <div class="te-field">
+                <label for="te-sortorder">排序权重</label>
+                <input id="te-sortorder" type="number" value="@_draft.SortOrder" @onchange="OnSortOrderChanged" />
+                <span class="te-hint">数字越小越靠前。</span>
+            </div>
+        </div>
+
+        <div class="te-field">
+            <label for="te-formats">支持的输入格式</label>
+            <input id="te-formats" type="text" value="@_inputFormatsText" @oninput="OnFormatsInput"
+                   @onblur="NormalizeFormatsText" placeholder="mp4, mkv, avi（逗号或空格分隔）" />
+            <span class="te-hint">留空表示不限格式；会自动去点号、转小写、去重。</span>
+            @if (_draft.SupportedInputFormats.Count > 0)
+            {
+                <div class="te-chips">
+                    @foreach (var format in _draft.SupportedInputFormats)
                     {
-                        <span class="field-error">@GetError("OutputExtension")</span>
+                        <span class="ffui-badge ffui-badge-info" @key="format">
+                            @format
+                            <button type="button" class="te-chip-remove" aria-label="移除输入格式 @format"
+                                    @onclick="() => RemoveFormat(format)">✕</button>
+                        </span>
                     }
                 </div>
-
-                <div class="form-group half">
-                    <label>排序权重</label>
-                    <input type="number" @bind="_template.SortOrder" />
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label>支持的输入格式（可选，逗号分隔）</label>
-                <input type="text" @bind="_inputFormatsText" placeholder="mp4, avi, mkv" />
-            </div>
-
-            <div class="form-group checkbox">
-                <label>
-                    <input type="checkbox" @bind="_template.RequiresHardwareAcceleration" />
-                    需要硬件加速
-                </label>
-            </div>
-
-            @if (_template.RequiresHardwareAcceleration)
-            {
-                <div class="form-group">
-                    <label>所需编码器</label>
-                    <select @bind="_template.RequiredEncoder">
-                        <option value="">选择编码器</option>
-                        <option value="h264_nvenc">NVIDIA NVENC H.264</option>
-                        <option value="hevc_nvenc">NVIDIA NVENC H.265</option>
-                        <option value="h264_qsv">Intel QSV H.264</option>
-                        <option value="hevc_qsv">Intel QSV H.265</option>
-                        <option value="h264_amf">AMD AMF H.264</option>
-                        <option value="hevc_amf">AMD AMF H.265</option>
-                    </select>
-                </div>
-            }
-
-            @if (!string.IsNullOrEmpty(_saveError))
-            {
-                <div class="error-message">@_saveError</div>
             }
         </div>
 
-        <div class="editor-footer">
-            <button class="btn-secondary" @onclick="Close">取消</button>
-            <button class="btn-primary" @onclick="Save" disabled="@_isSaving">
-                @(_isSaving ? "保存中..." : "保存")
+        <div class="te-field">
+            <label for="te-tags">标签</label>
+            <input id="te-tags" type="text" value="@_tagsText" @oninput="OnTagsInput" @onblur="NormalizeTagsText"
+                   placeholder="压缩, 归档, 手机（逗号或空格分隔）" />
+            @if (_draft.Tags.Count > 0)
+            {
+                <div class="te-chips">
+                    @foreach (var tag in _draft.Tags)
+                    {
+                        <span class="ffui-badge" @key="tag">
+                            @tag
+                            <button type="button" class="te-chip-remove" aria-label="移除标签 @tag"
+                                    @onclick="() => RemoveTag(tag)">✕</button>
+                        </span>
+                    }
+                </div>
+            }
+        </div>
+
+        <div class="te-check">
+            <input id="te-recommended" type="checkbox" checked="@_draft.IsRecommended" @onchange="OnRecommendedChanged" />
+            <label for="te-recommended">在模板列表中标记为推荐</label>
+        </div>
+    </section>
+
+    @* ── 命令参数 ─────────────────────────────────────────────── *@
+    <section class="te-section">
+        <h3 class="ffui-section-title">FFmpeg 命令参数</h3>
+
+        <div class="te-field">
+            <label for="te-command">命令参数 <span class="te-req" aria-hidden="true">*</span></label>
+            <textarea id="te-command" rows="5" value="@_draft.CommandArgs" @oninput="OnCommandInput"
+                      @ref="_commandElement"
+                      placeholder="-i &quot;{input}&quot; -c:v {encoder} {quality_args} {preset_args} {hwupload_args} -c:a aac &quot;{output}&quot;"></textarea>
+            <span class="te-hint">
+                不含 ffmpeg 本身；不要写 -y / -n（执行层会按「文件已存在时的处理方式」自动添加）。
+                含空格的路径写成 "{input}" 这种带引号的形式。
+            </span>
+        </div>
+
+        <div class="te-insert-row">
+            <div class="te-field te-field-inline">
+                <label for="te-placeholder-select">内置占位符</label>
+                <select id="te-placeholder-select" @bind="_selectedPlaceholder">
+                    @foreach (var group in PlaceholderGroups)
+                    {
+                        <optgroup label="@group.Title">
+                            @foreach (var placeholder in group.Items)
+                            {
+                                <option value="@placeholder.Name" @key="placeholder.Name">
+                                    @Braced(placeholder.Name) — @placeholder.Description
+                                </option>
+                            }
+                        </optgroup>
+                    }
+                </select>
+            </div>
+            <button type="button" class="ffui-btn" @onclick="InsertSelectedPlaceholderAsync">插入占位符</button>
+        </div>
+        <span class="te-hint">
+            浏览器端拿不到可靠的光标位置（app.js 里没有「插入到光标」的函数），所以这里只有一种行为：把选中的占位符追加到命令末尾。
+        </span>
+
+        <details class="te-details">
+            <summary>全部内置占位符说明（共 @CommandLineBuilder.BuiltInPlaceholders.Count 个）</summary>
+            <table class="te-table">
+                <thead>
+                    <tr>
+                        <th scope="col">占位符</th>
+                        <th scope="col">含义</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var group in PlaceholderGroups)
+                    {
+                        <tr @key="group.Title">
+                            <th scope="colgroup" colspan="2" class="te-table-group">@group.Title</th>
+                        </tr>
+                        @foreach (var placeholder in group.Items)
+                        {
+                            <tr @key="placeholder.Name">
+                                <td class="te-mono">@Braced(placeholder.Name)</td>
+                                <td>@placeholder.Description</td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </details>
+    </section>
+
+    @* ── 命令预览 ─────────────────────────────────────────────── *@
+    <section class="te-section">
+        <h3 class="ffui-section-title">命令预览</h3>
+        <div class="te-insert-row">
+            <span class="te-hint">
+                按各参数的默认值展开；{"{input}"} 与 {"{output}"} 用占位路径代替。
+            </span>
+            <button type="button" class="ffui-btn ffui-btn-sm" @onclick="CopyCommandAsync"
+                    disabled="@(string.IsNullOrWhiteSpace(_previewCommand))">
+                📋 复制
             </button>
         </div>
+
+        @if (!string.IsNullOrEmpty(_previewError))
+        {
+            <div class="ffui-alert ffui-alert-danger" role="status">
+                <span aria-hidden="true">❌</span>
+                <span>命令预览生成失败：@_previewError</span>
+            </div>
+        }
+        else if (string.IsNullOrWhiteSpace(_previewCommand))
+        {
+            <div class="ffui-alert ffui-alert-warning" role="status">
+                <span aria-hidden="true">⚠️</span>
+                <span>命令参数为空，暂时无法生成预览。</span>
+            </div>
+        }
+        else
+        {
+            <pre class="te-code">ffmpeg @_previewCommand</pre>
+        }
+
+        @if (_previewWarnings.Count > 0)
+        {
+            <div class="ffui-alert ffui-alert-warning" role="status">
+                <span aria-hidden="true">⚠️</span>
+                <div>
+                    @for (var i = 0; i < _previewWarnings.Count; i++)
+                    {
+                        <div @key="i">@_previewWarnings[i]</div>
+                    }
+                </div>
+            </div>
+        }
+    </section>
+
+    @* ── 试运行 ───────────────────────────────────────────────── *@
+    <section class="te-section">
+        <h3 class="ffui-section-title">试运行</h3>
+        <div class="te-insert-row">
+            <button type="button" class="ffui-btn" @onclick="RunTestAsync" disabled="@_isTesting">
+                @if (_isTesting)
+                {
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span>试运行中…</span>
+                }
+                else
+                {
+                    <span>🧪 试运行模板</span>
+                }
+            </button>
+            <span class="te-hint">
+                会用 FFmpeg 合成 3 秒测试素材真实执行一次，可验证模板在<b>本机</b>能否跑通（通常几秒钟）。
+            </span>
+        </div>
+
+        @if (_testResult is { } test)
+        {
+            <div class="ffui-alert @(test.Success ? "ffui-alert-success" : "ffui-alert-danger")" role="status" aria-live="polite">
+                <span aria-hidden="true">@(test.Success ? "✅" : "❌")</span>
+                <div class="te-test-body">
+                    <div>@test.Message</div>
+                    <div class="te-hint">耗时 @FormatDuration(test.Duration)</div>
+                    @if (!string.IsNullOrWhiteSpace(test.Command))
+                    {
+                        <pre class="te-code">@test.Command</pre>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(test.Output))
+                    {
+                        <details>
+                            <summary>FFmpeg 输出（诊断信息）</summary>
+                            <pre class="te-code">@test.Output</pre>
+                        </details>
+                    }
+                </div>
+            </div>
+        }
+    </section>
+
+    @* ── 校验结果 ─────────────────────────────────────────────── *@
+    <section class="te-section">
+        <h3 class="ffui-section-title">校验结果（实时）</h3>
+        <div aria-live="polite">
+            @if (_issues.Count == 0)
+            {
+                <div class="ffui-alert ffui-alert-success" role="status">
+                    <span aria-hidden="true">✅</span>
+                    <span>没有发现问题。</span>
+                </div>
+            }
+            else
+            {
+                for (var i = 0; i < _issues.Count; i++)
+                {
+                    var issue = _issues[i];
+                    <div class="ffui-alert @IssueClass(issue)" role="status" @key="i">
+                        <span aria-hidden="true">@IssueIcon(issue)</span>
+                        <div>
+                            <span class="te-issue-label">@IssueLabel(issue)</span>
+                            @issue.Message
+                            @if (FieldLabel(issue.Field) is { } fieldLabel)
+                            {
+                                <span class="te-hint">（字段：@fieldLabel）</span>
+                            }
+                        </div>
+                    </div>
+                }
+            }
+        </div>
+        <span class="te-hint">这里是 ITemplateService.Validate 的完整结果（错误 / 警告 / 提示）；存在错误时无法保存。</span>
+    </section>
+
+    @* ── 参数 ─────────────────────────────────────────────────── *@
+    <section class="te-section">
+        <h3 class="ffui-section-title">参数（@_draft.Parameters.Count）</h3>
+        <div class="te-insert-row te-wrap">
+            <span class="te-hint">添加常用参数：</span>
+            @foreach (var preset in ParameterPresets)
+            {
+                <button type="button" class="ffui-btn ffui-btn-sm" @key="preset.Key"
+                        @onclick="() => AddPresetParameter(preset.Key)">@preset.Label</button>
+            }
+        </div>
+
+        @if (UndeclaredPlaceholders.Count > 0)
+        {
+            <div class="ffui-alert ffui-alert-warning" role="status">
+                <span aria-hidden="true">⚠️</span>
+                <div>
+                    <div>命令里用到、但没有声明的占位符（保存后用户无法为它们填值）：</div>
+                    <div class="te-chips">
+                        @foreach (var name in UndeclaredPlaceholders)
+                        {
+                            <span class="ffui-badge ffui-badge-warning" @key="name">
+                                @Braced(name)
+                                <button type="button" class="te-chip-remove" aria-label="为 @name 创建参数"
+                                        @onclick="() => DeclarePlaceholder(name)">＋</button>
+                            </span>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (_draft.Parameters.Count == 0)
+        {
+            <div class="ffui-empty-state">
+                还没有声明任何参数。无参数模板也能用，只是用户在转换时无法调整这一项。
+            </div>
+        }
+
+        @for (var i = 0; i < _draft.Parameters.Count; i++)
+        {
+            var index = i;
+            var parameter = _draft.Parameters[i];
+            <div class="te-param" @key="parameter">
+                <div class="te-param-head">
+                    <span class="ffui-badge ffui-badge-primary">#@(index + 1)</span>
+                    @if (IsParameterUsed(parameter))
+                    {
+                        <span class="ffui-badge ffui-badge-success">命令中已使用</span>
+                    }
+                    else
+                    {
+                        <span class="ffui-badge ffui-badge-warning">命令中未使用</span>
+                    }
+                    <span class="te-spacer"></span>
+                    <button type="button" class="ffui-icon-btn" aria-label="上移参数 @parameter.Name"
+                            disabled="@(index == 0)" @onclick="() => MoveParameter(index, -1)">↑</button>
+                    <button type="button" class="ffui-icon-btn" aria-label="下移参数 @parameter.Name"
+                            disabled="@(index == _draft.Parameters.Count - 1)" @onclick="() => MoveParameter(index, 1)">↓</button>
+                    <button type="button" class="ffui-icon-btn" aria-label="删除参数 @parameter.Name"
+                            @onclick="() => RemoveParameter(index)">✕</button>
+                </div>
+
+                <div class="te-grid">
+                    <div class="te-field">
+                        <label for="te-p@(index)-name">参数名（占位符）</label>
+                        <input id="te-p@(index)-name" type="text" value="@parameter.Name"
+                               @onchange="e => OnParameterNameChanged(index, e)"
+                               @onblur="() => NormalizeParameterName(index)" placeholder="quality" />
+                        <span class="te-hint">命令里用 @Braced(parameter.Name) 引用；会自动转小写、去花括号、非法字符换成下划线。</span>
+                    </div>
+
+                    <div class="te-field">
+                        <label for="te-p@(index)-label">界面显示名称</label>
+                        <input id="te-p@(index)-label" type="text" value="@parameter.Label"
+                               @onchange="e => OnParameterLabelChanged(index, e)" placeholder="质量" />
+                    </div>
+
+                    <div class="te-field">
+                        <label for="te-p@(index)-kind">控件类型</label>
+                        <select id="te-p@(index)-kind" value="@parameter.Kind" @onchange="e => OnParameterKindChanged(index, e)">
+                            <option value="@TemplateParameterKind.Select">下拉选择</option>
+                            <option value="@TemplateParameterKind.Number">数字输入</option>
+                            <option value="@TemplateParameterKind.Text">文本输入</option>
+                            <option value="@TemplateParameterKind.Boolean">开关（是 / 否）</option>
+                        </select>
+                    </div>
+
+                    <div class="te-field">
+                        <label for="te-p@(index)-default">默认值</label>
+                        <input id="te-p@(index)-default" type="text" value="@parameter.DefaultValue"
+                               @onchange="e => OnParameterDefaultChanged(index, e)" placeholder="留空表示不设置" />
+                    </div>
+                </div>
+
+                <div class="te-field">
+                    <label for="te-p@(index)-description">帮助说明</label>
+                    <input id="te-p@(index)-description" type="text" value="@parameter.Description"
+                           @onchange="e => OnParameterDescriptionChanged(index, e)" placeholder="显示在参数控件下方的一句话说明" />
+                </div>
+
+                @if (!IsValidPlaceholderName(parameter.Name))
+                {
+                    <div class="ffui-alert ffui-alert-warning" role="status">
+                        <span aria-hidden="true">⚠️</span>
+                        <span>参数名无效：只允许小写字母、数字和下划线，且不能以数字开头，否则 @Braced(parameter.Name) 不会被识别成占位符。</span>
+                    </div>
+                }
+
+                @if (parameter.Kind == TemplateParameterKind.Number)
+                {
+                    <div class="te-grid">
+                        <div class="te-field">
+                            <label for="te-p@(index)-min">最小值</label>
+                            <input id="te-p@(index)-min" type="number" step="any" value="@parameter.Min"
+                                   @onchange="e => OnParameterMinChanged(index, e)" />
+                        </div>
+                        <div class="te-field">
+                            <label for="te-p@(index)-max">最大值</label>
+                            <input id="te-p@(index)-max" type="number" step="any" value="@parameter.Max"
+                                   @onchange="e => OnParameterMaxChanged(index, e)" />
+                        </div>
+                    </div>
+                }
+
+                @if (parameter.Kind == TemplateParameterKind.Boolean)
+                {
+                    <div class="te-grid">
+                        <div class="te-field">
+                            <label for="te-p@(index)-true">开启时替换成</label>
+                            <input id="te-p@(index)-true" type="text" value="@parameter.TrueValue"
+                                   @onchange="e => OnParameterTrueChanged(index, e)" placeholder="1" />
+                        </div>
+                        <div class="te-field">
+                            <label for="te-p@(index)-false">关闭时替换成</label>
+                            <input id="te-p@(index)-false" type="text" value="@parameter.FalseValue"
+                                   @onchange="e => OnParameterFalseChanged(index, e)" placeholder="留空表示移除该片段" />
+                        </div>
+                    </div>
+                }
+
+                @if (parameter.Kind == TemplateParameterKind.Select)
+                {
+                    <div class="te-options">
+                        <div class="te-param-head">
+                            <span class="te-hint">下拉选项（@parameter.Options.Count）</span>
+                            <span class="te-spacer"></span>
+                            <button type="button" class="ffui-btn ffui-btn-sm" @onclick="() => AddOption(index)">＋ 添加选项</button>
+                        </div>
+                        @if (parameter.Options.Count == 0)
+                        {
+                            <div class="ffui-alert ffui-alert-warning" role="status">
+                                <span aria-hidden="true">⚠️</span>
+                                <span>下拉参数至少需要一个选项，否则转换时用户没有可选的值。</span>
+                            </div>
+                        }
+                        @for (var j = 0; j < parameter.Options.Count; j++)
+                        {
+                            var optionIndex = j;
+                            var option = parameter.Options[j];
+                            <div class="te-option-row" @key="option">
+                                <div class="te-field">
+                                    <label class="visually-hidden" for="te-p@(index)-opt@(optionIndex)-value">选项值</label>
+                                    <input id="te-p@(index)-opt@(optionIndex)-value" type="text" value="@option.Value"
+                                           @onchange="e => OnOptionValueChanged(index, optionIndex, e)" placeholder="值" />
+                                </div>
+                                <div class="te-field">
+                                    <label class="visually-hidden" for="te-p@(index)-opt@(optionIndex)-label">显示文本</label>
+                                    <input id="te-p@(index)-opt@(optionIndex)-label" type="text" value="@option.Label"
+                                           @onchange="e => OnOptionLabelChanged(index, optionIndex, e)" placeholder="显示文本" />
+                                </div>
+                                <div class="te-field">
+                                    <label class="visually-hidden" for="te-p@(index)-opt@(optionIndex)-description">选项说明</label>
+                                    <input id="te-p@(index)-opt@(optionIndex)-description" type="text" value="@option.Description"
+                                           @onchange="e => OnOptionDescriptionChanged(index, optionIndex, e)" placeholder="说明（可选）" />
+                                </div>
+                                <div class="te-option-actions">
+                                    <button type="button" class="ffui-icon-btn" aria-label="上移选项"
+                                            disabled="@(optionIndex == 0)" @onclick="() => MoveOption(index, optionIndex, -1)">↑</button>
+                                    <button type="button" class="ffui-icon-btn" aria-label="下移选项"
+                                            disabled="@(optionIndex == parameter.Options.Count - 1)"
+                                            @onclick="() => MoveOption(index, optionIndex, 1)">↓</button>
+                                    <button type="button" class="ffui-icon-btn" aria-label="删除选项"
+                                            @onclick="() => RemoveOption(index, optionIndex)">✕</button>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+
+        <div>
+            <button type="button" class="ffui-btn ffui-btn-sm" @onclick="AddEmptyParameter">＋ 添加空参数</button>
+        </div>
+    </section>
+
+    @* ── 硬件加速 ─────────────────────────────────────────────── *@
+    <section class="te-section">
+        <h3 class="ffui-section-title">硬件加速</h3>
+
+        <div class="te-grid">
+            <div class="te-field">
+                <label for="te-hardware-mode">硬件加速策略</label>
+                <select id="te-hardware-mode" value="@_draft.HardwareMode" @onchange="OnHardwareModeChanged">
+                    <option value="@HardwareAccelerationMode.None">不使用（纯软件编码）</option>
+                    <option value="@HardwareAccelerationMode.Auto">自动（有硬件就用，没有回退软件）</option>
+                    <option value="@HardwareAccelerationMode.Required">必须使用硬件（没有就失败）</option>
+                </select>
+                <span class="te-hint">「是否需要硬件加速」由这一项推导，两者不会再出现不一致。</span>
+            </div>
+
+            <div class="te-field">
+                <label for="te-required-encoder">所需编码器</label>
+                <select id="te-required-encoder" value="@(_draft.RequiredEncoder ?? string.Empty)"
+                        @onchange="OnRequiredEncoderChanged"
+                        disabled="@(_draft.HardwareMode == HardwareAccelerationMode.None)">
+                    <option value="">（不指定）</option>
+                    @if (UnknownEncoderOption is { } unknown)
+                    {
+                        <option value="@unknown.Value">@unknown.Label</option>
+                    }
+                    <optgroup label="按编码器族">
+                        @foreach (var choice in FamilyEncoderChoices)
+                        {
+                            <option value="@choice.Value" @key="choice.Value">@choice.Label</option>
+                        }
+                    </optgroup>
+                    <optgroup label="按具体编码器">
+                        @foreach (var choice in ConcreteEncoderChoices)
+                        {
+                            <option value="@choice.Value" @key="choice.Value">@choice.Label</option>
+                        }
+                    </optgroup>
+                </select>
+                <span class="te-hint">
+                    「不使用」时会清空这一项；标记「（本机不可用）」的选项仍可选——模板也可能是为别的机器准备的。
+                    @if (DetectionLabel.Length > 0)
+                    {
+                        <span>本机可用性来自 @DetectionLabel 的硬件检测。</span>
+                    }
+                    else if (_isLoading)
+                    {
+                        <span>正在检测本机编码器，完成后会刷新标记…</span>
+                    }
+                </span>
+            </div>
+
+            <div class="te-field">
+                <label for="te-target-codec">目标编码格式</label>
+                <select id="te-target-codec" value="@_draft.TargetCodec" @onchange="OnTargetCodecChanged">
+                    <option value="">自动推断</option>
+                    @foreach (var codec in CodecChoices)
+                    {
+                        <option value="@codec.Value" @key="codec.Value">@codec.Label</option>
+                    }
+                </select>
+                <span class="te-hint">决定 {encoder} 会挑哪一类编码器，也决定没有硬件时回退到哪个软件编码器。</span>
+            </div>
+        </div>
+
+        <div class="ffui-alert ffui-alert-info" role="note">
+            <span aria-hidden="true">ℹ️</span>
+            <div>
+                <div>
+                    硬件加速模板推荐用 {encoder} + {quality_args} + {preset_args} + {hwupload_args} 组合：
+                </div>
+                <ul class="te-list">
+                    <li>{encoder}：按目标格式和本机硬件自动挑编码器（h264_nvenc / h264_qsv / h264_videotoolbox / h264_vaapi / libx264 …）。</li>
+                    <li>{quality_args}：展开成当前编码器真正接受的质量参数（-crf / -cq / -qp / -q:v / -global_quality …），由名为 quality 的参数驱动。</li>
+                    <li>{preset_args}：展开成该编码器的预设参数（如 -preset medium / -quality balanced）。</li>
+                    <li>{hwupload_args}：需要把帧上传到显存时补上滤镜（VA-API 的 format=nv12,hwupload）。</li>
+                </ul>
+                <div>
+                    不要硬写 -crf：硬件编码器不接受它，FFmpeg 只会打印一条警告然后忽略，命令照样成功退出，
+                    画质却完全没变——这种「看起来生效了」的模板最难排查。上面的校验会用警告提示这种情况。
+                </div>
+            </div>
+        </div>
+    </section>
+
+    @* 底部按钮栏：Modal 只有一个渲染片段，所以它是内容的最后一个元素 *@
+    <div class="ffui-modal-footer te-footer te-footer-sticky">
+        @if (ErrorCount > 0)
+        {
+            <span class="ffui-badge ffui-badge-danger">@ErrorCount 个错误，无法保存</span>
+        }
+        else if (WarningCount > 0)
+        {
+            <span class="ffui-badge ffui-badge-warning">@WarningCount 个警告</span>
+        }
+        @if (_isTesting)
+        {
+            <span class="ffui-badge ffui-badge-info">试运行中…</span>
+        }
+        <span class="te-spacer"></span>
+        <button type="button" class="ffui-btn" @onclick="RequestCloseAsync" disabled="@(_isSaving || _isTesting)">取消</button>
+        <button type="button" class="ffui-btn ffui-btn-primary" @onclick="SaveAsync"
+                disabled="@(_isSaving || ErrorCount > 0)">
+            @if (_isSaving)
+            {
+                <span class="spinner" aria-hidden="true"></span>
+                <span>保存中…</span>
+            }
+            else
+            {
+                <span>保存</span>
+            }
+        </button>
     </div>
-</div>
+</Modal>
+
+<ConfirmDialog IsOpen="_confirmDiscardOpen" IsOpenChanged="OnDiscardDialogOpenChanged"
+               Title="放弃未保存的修改？" Message="@DiscardMessage"
+               Detail="关闭后会丢失本次编辑的全部内容，此操作无法撤销。"
+               ConfirmText="放弃修改" CancelText="继续编辑" Danger="true"
+               OnConfirm="DiscardAndCloseAsync" OnCancel="CancelDiscard" />
+
+<style>
+    /* 只使用 app.css 中定义的颜色令牌，深色主题下自动跟随 */
+    .te-badges { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+
+    .te-section {
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+        padding-bottom: 1rem;
+        margin-bottom: 1rem;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .te-section:last-of-type { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+    .te-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 0.6rem 1rem;
+    }
+
+    .te-field { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+    .te-field > label { font-size: 0.85rem; font-weight: 500; color: var(--text-secondary); }
+    .te-field-inline { flex: 1; }
+
+    .te-hint { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; }
+    .te-req { color: var(--danger-color); }
+
+    .te-insert-row { display: flex; align-items: flex-end; gap: 0.6rem; }
+    .te-wrap { flex-wrap: wrap; align-items: center; }
+    .te-spacer { flex: 1 1 auto; }
+
+    .te-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.35rem; }
+
+    .te-chip-remove {
+        background: none;
+        border: none;
+        color: inherit;
+        cursor: pointer;
+        padding: 0 0 0 0.15rem;
+        font-size: 0.75rem;
+        line-height: 1;
+    }
+
+    .te-check { display: flex; align-items: center; gap: 0.5rem; }
+    .te-check label { font-size: 0.9rem; }
+
+    .te-details {
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        padding: 0.5rem 0.75rem;
+        background: var(--surface-3);
+    }
+
+    .te-details summary { cursor: pointer; font-size: 0.85rem; color: var(--text-secondary); }
+
+    .te-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 0.5rem; }
+    .te-table th, .te-table td {
+        text-align: left;
+        padding: 0.25rem 0.5rem;
+        border-bottom: 1px solid var(--border-color);
+        vertical-align: top;
+        color: var(--text-primary);
+    }
+    .te-table-group { background: var(--surface-3); color: var(--text-secondary); }
+    .te-mono { font-family: var(--font-mono); white-space: nowrap; }
+
+    .te-code {
+        margin: 0;
+        padding: 0.8rem;
+        background: var(--code-bg);
+        color: var(--text-primary);
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        word-break: break-all;
+        border-radius: var(--radius-sm);
+        max-height: 260px;
+        overflow: auto;
+    }
+
+    .te-test-body { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; flex: 1; }
+
+    .te-issue-label { display: inline-block; font-weight: 600; margin-right: 0.4rem; }
+
+    .te-param {
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        padding: 0.7rem 0.8rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.55rem;
+        background: var(--card-bg);
+    }
+
+    .te-param-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+
+    .te-options {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        padding: 0.5rem;
+        border: 1px dashed var(--border-color);
+        border-radius: var(--radius-sm);
+        background: var(--surface-3);
+    }
+
+    .te-option-row {
+        display: grid;
+        grid-template-columns: minmax(90px, 1fr) minmax(90px, 1fr) minmax(120px, 1.6fr) auto;
+        gap: 0.4rem;
+        align-items: center;
+    }
+
+    .te-option-actions { display: flex; gap: 0.1rem; }
+
+    .te-list { margin: 0.25rem 0 0.5rem; padding-left: 1.1rem; }
+    .te-list li { margin-bottom: 0.15rem; }
+
+    .te-footer { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    /* 按钮栏跟着内容滚动太难受：吸附在滚动区底部 */
+    .te-footer-sticky { position: sticky; bottom: 0; }
+</style>
 
 @code {
-    [Parameter]
-    public EventCallback OnSaved { get; set; }
+    // ────────────────────────────────────────────────────────────────
+    // 参数契约（其它页面依赖，勿改签名）
+    // ────────────────────────────────────────────────────────────────
 
-    private CommandTemplate _template = new();
-    private bool _isVisible;
-    private bool _isEditing;
+    /// <summary>要编辑的模板；null 表示新建</summary>
+    [Parameter] public CommandTemplate? Template { get; set; }
+
+    /// <summary>是否显示</summary>
+    [Parameter] public bool IsOpen { get; set; }
+
+    /// <summary>显示状态变化回调（配合 @bind-IsOpen）</summary>
+    [Parameter] public EventCallback<bool> IsOpenChanged { get; set; }
+
+    /// <summary>true 表示编辑 / 新建系统预设（走 Create/UpdateSystemTemplateAsync）</summary>
+    [Parameter] public bool IsSystem { get; set; }
+
+    /// <summary>保存成功后回调（返回实际保存的模板，可能被服务改名）</summary>
+    [Parameter] public EventCallback<CommandTemplate> OnSaved { get; set; }
+
+    // ────────────────────────────────────────────────────────────────
+    // 状态
+    // ────────────────────────────────────────────────────────────────
+
+    /// <summary>编辑中的深拷贝，绝不直接改 Template</summary>
+    private CommandTemplate _draft = new();
+
+    /// <summary>打开时克隆的源对象，用于判断「重新打开的是不是同一个模板」</summary>
+    private CommandTemplate? _loadedTemplate;
+
+    private bool _hasDraft;
+    private bool _isNew = true;
     private bool _isSaving;
-    private string _saveError = string.Empty;
+    private bool _isTesting;
+    private bool _isLoading;
+    private bool _confirmDiscardOpen;
+
+    private string _originalFingerprint = string.Empty;
     private string _inputFormatsText = string.Empty;
+    private string _tagsText = string.Empty;
+    private string _selectedPlaceholder = "encoder";
+    private string _previewCommand = string.Empty;
+    private string _previewError = string.Empty;
+    private string _loadError = string.Empty;
+
+    private IReadOnlyList<string> _previewWarnings = [];
+    private IReadOnlyList<TemplateIssue> _issues = [];
+    private HashSet<string> _usedPlaceholders = new(StringComparer.OrdinalIgnoreCase);
+
     private List<string> _existingCategories = [];
-    
-    // 字段错误
-    private Dictionary<string, string> _fieldErrors = [];
-    
-    // 输入框引用
-    private ElementReference _nameInput;
-    private ElementReference _categoryInput;
-    private ElementReference _commandArgsInput;
-    private ElementReference _outputExtInput;
-    
-    private bool HasError(string field) => _fieldErrors.ContainsKey(field);
-    private string GetError(string field) => _fieldErrors.TryGetValue(field, out var error) ? error : string.Empty;
+    private List<CommandTemplate> _allTemplates = [];
+    private HashSet<string>? _availableEncoders;
+    private DateTime? _detectedAt;
+    private List<EncoderChoice> _encoderOptions = [];
 
-    public async Task OpenForCreate()
+    private TemplateTestResult? _testResult;
+    private ElementReference _commandElement;
+
+    /// <summary>打开 / 重新加载的序号，避免迟到的异步结果覆盖新一轮状态</summary>
+    private int _loadVersion;
+
+    // ────────────────────────────────────────────────────────────────
+    // 生命周期：打开时深拷贝，关闭时清理
+    // ────────────────────────────────────────────────────────────────
+
+    protected override void OnParametersSet()
     {
-        _template = new CommandTemplate();
+        if (IsOpen)
+        {
+            if (!_hasDraft)
+            {
+                _hasDraft = true;
+                BeginLoad();
+            }
+            else if (!SameId(Template?.Id, _loadedTemplate?.Id) && !IsDirty)
+            {
+                // 父组件在同一次打开期间换成了另一个模板（例如先 IsOpen=true 再设置 Template）。
+                // 只有没编辑过时才重新加载，避免覆盖用户正在填的内容。
+                BeginLoad();
+            }
+        }
+        else if (_hasDraft)
+        {
+            _hasDraft = false;
+            ResetDraft();
+        }
+    }
+
+    private void BeginLoad()
+    {
+        var source = Template;
+
+        // 防御：如果父组件在脏状态下重新打开同一个模板，保留用户正在编辑的内容
+        if (IsDirty && ReferenceEquals(source, _loadedTemplate)) return;
+
+        _loadedTemplate = source;
+        // 页面可能传 null，也可能传一个空的 CommandTemplate 表示新建；保存前还会用
+        // GetTemplateByIdAsync 做一次权威判断，这里只是为了标题不闪错。
+        _isNew = source is null
+                 || (string.IsNullOrWhiteSpace(source.Name) && string.IsNullOrWhiteSpace(source.CommandArgs));
+        _draft = CloneTemplate(source);
+        _originalFingerprint = Fingerprint(_draft);
+        _inputFormatsText = string.Join(", ", _draft.SupportedInputFormats);
+        _tagsText = string.Join(", ", _draft.Tags);
+        _selectedPlaceholder = "encoder";
+        _testResult = null;
+        _previewError = string.Empty;
+        _loadError = string.Empty;
+        _confirmDiscardOpen = false;
+        _existingCategories = [];
+        _allTemplates = [];
+        _availableEncoders = null;
+        _detectedAt = null;
+
+        RefreshDerived();
+        BuildEncoderOptions();
+
+        _isLoading = true;
+        var version = ++_loadVersion;
+        _ = LoadLookupsAsync(version);
+    }
+
+    /// <summary>分类 / 同名模板 / 本机编码器可用性——异步加载，不阻塞编辑器打开</summary>
+    private async Task LoadLookupsAsync(int version)
+    {
+        try
+        {
+            var categoriesTask = TemplateService.GetCategoriesAsync();
+            var templatesTask = TemplateService.GetAllTemplatesAsync();
+            await Task.WhenAll(categoriesTask, templatesTask);
+
+            if (version != _loadVersion) return;
+            _existingCategories = await categoriesTask;
+            _allTemplates = await templatesTask;
+
+            // Template == null 只是「新建」的一种情况：页面也可能传一个空的 CommandTemplate。
+            // 以数据库里是否存在同一个 Id 为准，避免把新建当成编辑（那样保存会失败）。
+            if (!_allTemplates.Any(template => SameId(template.Id, _draft.Id))) _isNew = true;
+
+            var report = HardwareDetection.LastReport ?? await HardwareDetection.DetectAsync();
+            if (version != _loadVersion) return;
+
+            _availableEncoders = report.Encoders
+                .Where(encoder => encoder.IsAvailable)
+                .Select(encoder => encoder.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _detectedAt = report.DetectedAt;
+            BuildEncoderOptions();
+        }
+        catch (Exception ex)
+        {
+            _loadError = ex.Message;
+            Toast.Warning($"模板辅助信息加载失败：{ex.Message}");
+        }
+        finally
+        {
+            if (version == _loadVersion)
+            {
+                _isLoading = false;
+                try
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+                catch (Exception)
+                {
+                    // 组件已经被移除（例如用户已经离开页面），此时没有任何界面可以提示
+                }
+            }
+        }
+    }
+
+    private void ResetDraft()
+    {
+        _draft = new CommandTemplate();
+        _loadedTemplate = null;
+        _originalFingerprint = Fingerprint(_draft);
+        _issues = [];
+        _usedPlaceholders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _previewCommand = string.Empty;
+        _previewWarnings = [];
+        _previewError = string.Empty;
+        _testResult = null;
         _inputFormatsText = string.Empty;
-        _isEditing = false;
-        _saveError = string.Empty;
-        _fieldErrors.Clear();
-        await LoadCategories();
-        _isVisible = true;
-        StateHasChanged();
+        _tagsText = string.Empty;
+        _confirmDiscardOpen = false;
+        _loadVersion++;
     }
 
-    public async Task OpenForEdit(CommandTemplate template)
+    // ────────────────────────────────────────────────────────────────
+    // 关闭流程：脏检查 → ConfirmDialog
+    // ────────────────────────────────────────────────────────────────
+
+    private string Title => _isNew
+        ? (IsSystem ? "新建系统预设" : "新建模板")
+        : (IsSystem ? "编辑系统预设" : "编辑模板");
+
+    private string DiscardMessage
     {
-        _template = new CommandTemplate
+        get
         {
-            Id = template.Id,
-            Name = template.Name,
-            Description = template.Description,
-            Category = template.Category,
-            CommandArgs = template.CommandArgs,
-            OutputExtension = template.OutputExtension,
-            SupportedInputFormats = [.. template.SupportedInputFormats],
-            RequiresHardwareAcceleration = template.RequiresHardwareAcceleration,
-            RequiredEncoder = template.RequiredEncoder,
-            SortOrder = template.SortOrder
-        };
-        _inputFormatsText = string.Join(", ", template.SupportedInputFormats);
-        _isEditing = true;
-        _saveError = string.Empty;
-        _fieldErrors.Clear();
-        await LoadCategories();
-        _isVisible = true;
-        StateHasChanged();
+            var name = _draft.Name?.Trim() ?? string.Empty;
+            return $"模板「{(name.Length > 0 ? name : "未命名")}」有未保存的修改。";
+        }
     }
 
-    private async Task LoadCategories()
-    {
-        _existingCategories = await TemplateService.GetCategoriesAsync();
-    }
+    private bool IsDirty => Fingerprint(_draft) != _originalFingerprint;
 
-    private async Task Save()
+    /// <summary>
+    /// Modal 在 Esc / 遮罩 / ✕ 时会先把自己的 IsOpen 置为 false，再用 false 调用这个回调。
+    /// 有未保存修改（或正在保存/试运行）时，我们立刻用 true 回推一次，让父组件的
+    /// @bind-IsOpen 保持打开，改用 ConfirmDialog 询问。
+    /// </summary>
+    private async Task OnModalIsOpenChanged(bool value)
     {
-        _saveError = string.Empty;
-        _fieldErrors.Clear();
-        
-        // 验证并收集所有错误
-        if (string.IsNullOrWhiteSpace(_template.Name))
+        if (value)
         {
-            _fieldErrors["Name"] = "请输入模板名称";
-        }
-        if (string.IsNullOrWhiteSpace(_template.Category))
-        {
-            _fieldErrors["Category"] = "请输入模板分类";
-        }
-        if (string.IsNullOrWhiteSpace(_template.CommandArgs))
-        {
-            _fieldErrors["CommandArgs"] = "请输入 FFmpeg 命令参数";
-        }
-        if (string.IsNullOrWhiteSpace(_template.OutputExtension))
-        {
-            _fieldErrors["OutputExtension"] = "请输入输出扩展名";
-        }
-
-        // 如果有错误，聚焦到第一个错误字段
-        if (_fieldErrors.Count > 0)
-        {
-            StateHasChanged();
-            await FocusFirstError();
+            await IsOpenChanged.InvokeAsync(true);
             return;
         }
 
-        // 解析输入格式
-        _template.SupportedInputFormats = _inputFormatsText
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(f => f.TrimStart('.').ToLower())
+        if (_isSaving || _isTesting || IsDirty)
+        {
+            if (IsDirty && !_isSaving && !_isTesting) _confirmDiscardOpen = true;
+            await IsOpenChanged.InvokeAsync(true);
+            return;
+        }
+
+        await CloseModalAsync();
+    }
+
+    private async Task RequestCloseAsync()
+    {
+        if (_isSaving || _isTesting) return;
+
+        if (IsDirty)
+        {
+            _confirmDiscardOpen = true;
+            return;
+        }
+
+        await CloseModalAsync();
+    }
+
+    private Task OnDiscardDialogOpenChanged(bool value)
+    {
+        _confirmDiscardOpen = value;
+        return Task.CompletedTask;
+    }
+
+    private Task CancelDiscard()
+    {
+        _confirmDiscardOpen = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task DiscardAndCloseAsync()
+    {
+        _confirmDiscardOpen = false;
+        await CloseModalAsync();
+    }
+
+    private async Task CloseModalAsync()
+    {
+        IsOpen = false;
+        ResetDraft();
+        await IsOpenChanged.InvokeAsync(false);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 校验 / 预览（每次改动后重算一次）
+    // ────────────────────────────────────────────────────────────────
+
+    private void RefreshDerived()
+    {
+        _issues = TemplateService.Validate(_draft)
+            .OrderByDescending(issue => (int)issue.Severity)
             .ToList();
+
+        _usedPlaceholders = new HashSet<string>(
+            CommandLineBuilder.ExtractPlaceholders(_draft.CommandArgs),
+            StringComparer.OrdinalIgnoreCase);
+
+        _previewError = string.Empty;
+        _previewWarnings = [];
+
+        try
+        {
+            var context = new CommandContext
+            {
+                InputPath = "<输入文件>",
+                OutputPath = "<输出文件>",
+                Parameters = BuildPreviewParameters(),
+                Encoder = ResolvePreviewEncoder()
+            };
+
+            var built = FFmpeg.BuildCommand(_draft, context);
+            _previewCommand = built.CommandLine;
+            _previewWarnings = built.Warnings;
+        }
+        catch (Exception ex)
+        {
+            _previewCommand = string.Empty;
+            _previewError = ex.Message;
+        }
+    }
+
+    /// <summary>预览用的参数值：每个参数取 DefaultValue</summary>
+    private Dictionary<string, string> BuildPreviewParameters()
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var parameter in _draft.Parameters)
+        {
+            var name = parameter.Name?.Trim() ?? string.Empty;
+            if (name.Length == 0) continue;
+            values[name] = parameter.DefaultValue ?? string.Empty;
+        }
+        return values;
+    }
+
+    /// <summary>
+    /// 预览用的编码器画像：具体编码器名优先；族名取该族优先级最高的画像；
+    /// 其余情况回退到目标格式的软件编码器，这样 {quality_args} / {preset_args} 一定能展开。
+    /// </summary>
+    private EncoderProfile? ResolvePreviewEncoder()
+    {
+        var required = _draft.RequiredEncoder?.Trim();
+        if (!string.IsNullOrEmpty(required))
+        {
+            var exact = EncoderCatalog.Find(required);
+            if (exact is not null) return exact;
+
+            var inFamily = EncoderCatalog.ByFamily(required)
+                .OrderByDescending(profile => profile.SupportsCurrentPlatform)
+                .ThenBy(profile => profile.SortPreference)
+                .FirstOrDefault();
+            if (inFamily is not null) return inFamily;
+        }
+
+        var codec = string.IsNullOrWhiteSpace(_draft.TargetCodec) ? "h264" : _draft.TargetCodec.Trim();
+        return EncoderCatalog.SoftwareFallback(codec)
+               ?? EncoderCatalog.SoftwareFallback("h264")
+               ?? EncoderCatalog.Find("libx264");
+    }
+
+    private int ErrorCount => _issues.Count(issue => issue.Severity == TemplateIssueSeverity.Error);
+    private int WarningCount => _issues.Count(issue => issue.Severity == TemplateIssueSeverity.Warning);
+
+    private static string IssueClass(TemplateIssue issue) => issue.Severity switch
+    {
+        TemplateIssueSeverity.Error => "ffui-alert-danger",
+        TemplateIssueSeverity.Warning => "ffui-alert-warning",
+        _ => "ffui-alert-info"
+    };
+
+    private static string IssueIcon(TemplateIssue issue) => issue.Severity switch
+    {
+        TemplateIssueSeverity.Error => "❌",
+        TemplateIssueSeverity.Warning => "⚠️",
+        _ => "ℹ️"
+    };
+
+    private static string IssueLabel(TemplateIssue issue) => issue.Severity switch
+    {
+        TemplateIssueSeverity.Error => "错误",
+        TemplateIssueSeverity.Warning => "警告",
+        _ => "提示"
+    };
+
+    private static string? FieldLabel(string? field) => field switch
+    {
+        nameof(CommandTemplate.Name) => "模板名称",
+        nameof(CommandTemplate.CommandArgs) => "命令参数",
+        nameof(CommandTemplate.OutputExtension) => "输出扩展名",
+        nameof(CommandTemplate.Category) => "分类",
+        nameof(CommandTemplate.Parameters) => "参数",
+        nameof(CommandTemplate.RequiredEncoder) => "所需编码器",
+        null or "" => null,
+        _ => field
+    };
+
+    // ────────────────────────────────────────────────────────────────
+    // 基本信息编辑
+    // ────────────────────────────────────────────────────────────────
+
+    private static string Str(ChangeEventArgs e) => e.Value?.ToString() ?? string.Empty;
+
+    /// <summary>同名模板（忽略大小写，排除自己）</summary>
+    private CommandTemplate? DuplicateName
+    {
+        get
+        {
+            var name = _draft.Name?.Trim() ?? string.Empty;
+            if (name.Length == 0) return null;
+
+            return _allTemplates.FirstOrDefault(template =>
+                !SameId(template.Id, _draft.Id) &&
+                string.Equals((template.Name ?? string.Empty).Trim(), name, StringComparison.CurrentCultureIgnoreCase));
+        }
+    }
+
+    private void OnNameInput(ChangeEventArgs e)
+    {
+        _draft.Name = Str(e);
+        RefreshDerived();
+    }
+
+    /// <summary>命令参数编辑：更新草稿并重新计算校验结果与命令预览。</summary>
+    private void OnCommandInput(ChangeEventArgs e)
+    {
+        _draft.CommandArgs = Str(e);
+        RefreshDerived();
+    }
+
+    private void NormalizeName()
+    {
+        var normalized = (_draft.Name ?? string.Empty).Trim().Trim('{', '}');
+        if (!string.Equals(normalized, _draft.Name, StringComparison.Ordinal))
+        {
+            _draft.Name = normalized;
+            RefreshDerived();
+        }
+    }
+
+    private void OnCategoryChanged(ChangeEventArgs e) => _draft.Category = Str(e).Trim();
+
+    private void OnDescriptionChanged(ChangeEventArgs e) => _draft.Description = Str(e);
+
+    private void OnExtensionInput(ChangeEventArgs e)
+    {
+        _draft.OutputExtension = Str(e);
+        RefreshDerived();
+    }
+
+    private void NormalizeExtensionField()
+    {
+        _draft.OutputExtension = NormalizeExtension(_draft.OutputExtension);
+        RefreshDerived();
+    }
+
+    private void OnSortOrderChanged(ChangeEventArgs e) => _draft.SortOrder = ParseInt(e, _draft.SortOrder);
+
+    private void OnRecommendedChanged(ChangeEventArgs e) => _draft.IsRecommended = e.Value is bool value && value;
+
+    private void OnFormatsInput(ChangeEventArgs e)
+    {
+        _inputFormatsText = Str(e);
+        _draft.SupportedInputFormats = SplitFormats(_inputFormatsText);
+    }
+
+    private void NormalizeFormatsText()
+    {
+        _draft.SupportedInputFormats = SplitFormats(_inputFormatsText);
+        _inputFormatsText = string.Join(", ", _draft.SupportedInputFormats);
+    }
+
+    private void RemoveFormat(string format)
+    {
+        _draft.SupportedInputFormats.RemoveAll(item => string.Equals(item, format, StringComparison.OrdinalIgnoreCase));
+        _inputFormatsText = string.Join(", ", _draft.SupportedInputFormats);
+    }
+
+    private void OnTagsInput(ChangeEventArgs e)
+    {
+        _tagsText = Str(e);
+        _draft.Tags = SplitTags(_tagsText);
+    }
+
+    private void NormalizeTagsText()
+    {
+        _draft.Tags = SplitTags(_tagsText);
+        _tagsText = string.Join(", ", _draft.Tags);
+    }
+
+    private void RemoveTag(string tag)
+    {
+        _draft.Tags.RemoveAll(item => string.Equals(item, tag, StringComparison.CurrentCultureIgnoreCase));
+        _tagsText = string.Join(", ", _draft.Tags);
+    }
+
+    private static readonly char[] TokenSeparators = [',', '，', '、', ' ', '\t', '\r', '\n', ';', '；'];
+
+    private static List<string> SplitFormats(string? text) => SplitTokens(text)
+        .Select(token => token.TrimStart('.').ToLowerInvariant())
+        .Where(token => token.Length > 0)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    private static List<string> SplitTags(string? text) => SplitTokens(text)
+        .Distinct(StringComparer.CurrentCultureIgnoreCase)
+        .ToList();
+
+    private static List<string> SplitTokens(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return [];
+        return text.Split(TokenSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => token.Length > 0)
+            .ToList();
+    }
+
+    private static string NormalizeExtension(string? value) =>
+        (value ?? string.Empty).Trim().TrimStart('.').ToLowerInvariant();
+
+    private static int ParseInt(ChangeEventArgs e, int fallback) =>
+        int.TryParse(e.Value?.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : fallback;
+
+    private static double? ParseDouble(ChangeEventArgs e)
+    {
+        var text = e.Value?.ToString();
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : null;
+    }
+
+    private static bool SameId(ObjectId? left, ObjectId? right) =>
+        string.Equals(left?.ToString(), right?.ToString(), StringComparison.Ordinal);
+
+    // ────────────────────────────────────────────────────────────────
+    // 占位符
+    // ────────────────────────────────────────────────────────────────
+
+    private static string Braced(string? name) => "{" + (name ?? string.Empty) + "}";
+
+    private static bool IsValidPlaceholderName(string? name)
+    {
+        var value = (name ?? string.Empty).Trim();
+        if (value.Length == 0) return false;
+        if (char.IsDigit(value[0])) return false;
+        return value.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '_');
+    }
+
+    private static string NormalizePlaceholderName(string? name)
+    {
+        var raw = (name ?? string.Empty).Trim().Trim('{', '}').ToLowerInvariant();
+        var builder = new StringBuilder(raw.Length);
+        foreach (var c in raw)
+        {
+            if (c is >= 'a' and <= 'z' or >= '0' and <= '9' or '_') builder.Append(c);
+            else if (c is '-' or '.' or ' ') builder.Append('_');
+        }
+        return builder.ToString().Trim('_');
+    }
+
+    private async Task InsertSelectedPlaceholderAsync()
+    {
+        var name = _selectedPlaceholder?.Trim() ?? string.Empty;
+        if (name.Length == 0) return;
+
+        var token = Braced(name);
+        _draft.CommandArgs = string.IsNullOrWhiteSpace(_draft.CommandArgs)
+            ? token
+            : _draft.CommandArgs.TrimEnd() + " " + token;
+
+        RefreshDerived();
+        await _commandElement.FocusAsync();
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 参数编辑
+    // ────────────────────────────────────────────────────────────────
+
+    private static readonly (string Key, string Label)[] ParameterPresets =
+    [
+        ("quality", "＋ 质量 quality"),
+        ("audio_bitrate", "＋ 音频码率 audio_bitrate"),
+        ("preset", "＋ 编码预设 preset"),
+        ("width", "＋ 宽度 width"),
+        ("watermark", "＋ 水印路径 watermark"),
+    ];
+
+    private void AddPresetParameter(string key)
+    {
+        var parameter = CreatePresetParameter(key);
+        if (parameter is null) return;
+
+        if (_draft.Parameters.Any(existing =>
+                string.Equals((existing.Name ?? string.Empty).Trim(), parameter.Name, StringComparison.OrdinalIgnoreCase)))
+        {
+            Toast.Warning($"已经存在参数「{parameter.Name}」，无需重复添加。");
+            return;
+        }
+
+        _draft.Parameters.Add(parameter);
+        RefreshDerived();
+    }
+
+    private static TemplateParameter? CreatePresetParameter(string key) => key switch
+    {
+        "quality" => new TemplateParameter
+        {
+            Name = "quality",
+            Label = "质量",
+            Description = "数值越小画质越好、文件越大。会被 {quality_args} 展开成当前编码器正确的质量参数。",
+            Kind = TemplateParameterKind.Select,
+            DefaultValue = string.Empty,
+            Options =
+            [
+                new("", "自动（推荐）", "留空时使用当前编码器的默认质量"),
+                new("18", "高画质"),
+                new("23", "均衡"),
+                new("28", "小体积"),
+                new("32", "极小体积"),
+            ]
+        },
+        "audio_bitrate" => new TemplateParameter
+        {
+            Name = "audio_bitrate",
+            Label = "音频码率",
+            Description = "用于 -b:a {audio_bitrate}，例如 128k。",
+            Kind = TemplateParameterKind.Select,
+            DefaultValue = "128k",
+            Options =
+            [
+                new("96k", "96 kbps"),
+                new("128k", "128 kbps"),
+                new("192k", "192 kbps"),
+                new("256k", "256 kbps"),
+            ]
+        },
+        "preset" => new TemplateParameter
+        {
+            Name = "preset",
+            Label = "编码速度",
+            Description = "软件编码器的 -preset {preset}；越慢压缩率越高（体积更小）。",
+            Kind = TemplateParameterKind.Select,
+            DefaultValue = "medium",
+            Options =
+            [
+                new("veryfast", "很快"),
+                new("fast", "快"),
+                new("medium", "中等（推荐）"),
+                new("slow", "慢 · 更小"),
+                new("veryslow", "很慢 · 最小"),
+            ]
+        },
+        "width" => new TemplateParameter
+        {
+            Name = "width",
+            Label = "宽度（像素）",
+            Description = "用于 scale={width}:-2。注意 {width} 也是内置占位符（原始视频宽度），参数值会覆盖内置值。",
+            Kind = TemplateParameterKind.Number,
+            DefaultValue = "1280",
+            Min = 16,
+            Max = 7680
+        },
+        "watermark" => new TemplateParameter
+        {
+            Name = "watermark",
+            Label = "水印图片路径",
+            Description = "用于 -i \"{watermark}\"；试运行时会自动替换成测试素材。",
+            Kind = TemplateParameterKind.Text,
+            DefaultValue = string.Empty
+        },
+        _ => null
+    };
+
+    private void DeclarePlaceholder(string name)
+    {
+        var normalized = NormalizePlaceholderName(name);
+        if (normalized.Length == 0) return;
+
+        if (_draft.Parameters.Any(existing =>
+                string.Equals((existing.Name ?? string.Empty).Trim(), normalized, StringComparison.OrdinalIgnoreCase)))
+        {
+            Toast.Warning($"参数「{normalized}」已经存在。");
+            return;
+        }
+
+        _draft.Parameters.Add(new TemplateParameter
+        {
+            Name = normalized,
+            Label = normalized,
+            Kind = TemplateParameterKind.Text,
+            DefaultValue = string.Empty,
+            Description = "由「命令中未声明的占位符」提示创建，请补充显示名与说明。"
+        });
+        RefreshDerived();
+    }
+
+    private void AddEmptyParameter()
+    {
+        _draft.Parameters.Add(new TemplateParameter
+        {
+            Name = $"param{_draft.Parameters.Count + 1}",
+            Label = string.Empty,
+            Kind = TemplateParameterKind.Text,
+            DefaultValue = string.Empty
+        });
+        RefreshDerived();
+    }
+
+    private void RemoveParameter(int index)
+    {
+        if (Probe(index) is null) return;
+        _draft.Parameters.RemoveAt(index);
+        RefreshDerived();
+    }
+
+    private void MoveParameter(int index, int delta)
+    {
+        var target = index + delta;
+        if (Probe(index) is null) return;
+        if (target < 0 || target >= _draft.Parameters.Count) return;
+
+        (_draft.Parameters[index], _draft.Parameters[target]) = (_draft.Parameters[target], _draft.Parameters[index]);
+        RefreshDerived();
+    }
+
+    private void OnParameterNameChanged(int index, ChangeEventArgs e)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.Name = Str(e);
+        RefreshDerived();
+    }
+
+    private void NormalizeParameterName(int index)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.Name = NormalizePlaceholderName(parameter.Name);
+        if (string.IsNullOrWhiteSpace(parameter.Label)) parameter.Label = parameter.Name;
+        RefreshDerived();
+    }
+
+    private void OnParameterLabelChanged(int index, ChangeEventArgs e)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.Label = Str(e);
+    }
+
+    private void OnParameterDescriptionChanged(int index, ChangeEventArgs e)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.Description = Str(e);
+    }
+
+    private void OnParameterKindChanged(int index, ChangeEventArgs e)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.Kind = Enum.TryParse<TemplateParameterKind>(Str(e), out var kind) ? kind : TemplateParameterKind.Text;
+        RefreshDerived();
+    }
+
+    private void OnParameterDefaultChanged(int index, ChangeEventArgs e)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.DefaultValue = Str(e);
+        RefreshDerived();
+    }
+
+    private void OnParameterMinChanged(int index, ChangeEventArgs e)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.Min = ParseDouble(e);
+    }
+
+    private void OnParameterMaxChanged(int index, ChangeEventArgs e)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.Max = ParseDouble(e);
+    }
+
+    private void OnParameterTrueChanged(int index, ChangeEventArgs e)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.TrueValue = Str(e);
+    }
+
+    private void OnParameterFalseChanged(int index, ChangeEventArgs e)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.FalseValue = Str(e);
+    }
+
+    private void AddOption(int index)
+    {
+        if (Probe(index) is not { } parameter) return;
+        parameter.Options.Add(new TemplateParameterOption(string.Empty, string.Empty, string.Empty));
+        RefreshDerived();
+    }
+
+    private void RemoveOption(int index, int optionIndex)
+    {
+        if (Probe(index) is not { } parameter) return;
+        if (optionIndex < 0 || optionIndex >= parameter.Options.Count) return;
+
+        parameter.Options.RemoveAt(optionIndex);
+        RefreshDerived();
+    }
+
+    private void MoveOption(int index, int optionIndex, int delta)
+    {
+        if (Probe(index) is not { } parameter) return;
+
+        var target = optionIndex + delta;
+        if (optionIndex < 0 || optionIndex >= parameter.Options.Count) return;
+        if (target < 0 || target >= parameter.Options.Count) return;
+
+        (parameter.Options[optionIndex], parameter.Options[target]) =
+            (parameter.Options[target], parameter.Options[optionIndex]);
+        RefreshDerived();
+    }
+
+    private void OnOptionValueChanged(int index, int optionIndex, ChangeEventArgs e)
+    {
+        if (Probe(index, optionIndex) is not { } option) return;
+        option.Value = Str(e);
+        RefreshDerived();
+    }
+
+    private void OnOptionLabelChanged(int index, int optionIndex, ChangeEventArgs e)
+    {
+        if (Probe(index, optionIndex) is not { } option) return;
+        option.Label = Str(e);
+    }
+
+    private void OnOptionDescriptionChanged(int index, int optionIndex, ChangeEventArgs e)
+    {
+        if (Probe(index, optionIndex) is not { } option) return;
+        option.Description = Str(e);
+    }
+
+    private TemplateParameter? Probe(int index) =>
+        index >= 0 && index < _draft.Parameters.Count ? _draft.Parameters[index] : null;
+
+    private TemplateParameterOption? Probe(int index, int optionIndex)
+    {
+        var parameter = Probe(index);
+        if (parameter is null) return null;
+        return optionIndex >= 0 && optionIndex < parameter.Options.Count ? parameter.Options[optionIndex] : null;
+    }
+
+    /// <summary>参数是否真的会被命令用到（quality / q / crf 通过 {quality_args} 间接生效）</summary>
+    private bool IsParameterUsed(TemplateParameter parameter)
+    {
+        var name = parameter.Name?.Trim() ?? string.Empty;
+        if (name.Length == 0) return false;
+        if (_usedPlaceholders.Contains(name)) return true;
+
+        return name is "quality" or "q" or "crf"
+            && (_usedPlaceholders.Contains("quality_args")
+                || _usedPlaceholders.Contains("crf")
+                || _usedPlaceholders.Contains("quality")
+                || _usedPlaceholders.Contains("q"));
+    }
+
+    private IReadOnlyList<string> UndeclaredPlaceholders
+    {
+        get
+        {
+            var declared = _draft.Parameters
+                .Select(parameter => (parameter.Name ?? string.Empty).Trim())
+                .Where(name => name.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return _usedPlaceholders
+                .Where(name => !CommandLineBuilder.BuiltInPlaceholders.Contains(name))
+                .Where(name => !declared.Contains(name))
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 硬件加速
+    // ────────────────────────────────────────────────────────────────
+
+    private static readonly string[] EncoderFamilies =
+        ["nvenc", "qsv", "amf", "videotoolbox", "vaapi", "vulkan", "mf"];
+
+    private const string UnavailableSuffix = "（本机不可用）";
+
+    private sealed record EncoderChoice(string Value, string Label, bool IsFamily);
+
+    private void OnHardwareModeChanged(ChangeEventArgs e)
+    {
+        _draft.HardwareMode = Enum.TryParse<HardwareAccelerationMode>(Str(e), out var mode)
+            ? mode
+            : HardwareAccelerationMode.None;
+
+        // 两个状态不允许漂移：RequiresHardwareAcceleration 由 HardwareMode 推导
+        _draft.RequiresHardwareAcceleration = _draft.HardwareMode == HardwareAccelerationMode.Required;
+        if (_draft.HardwareMode == HardwareAccelerationMode.None) _draft.RequiredEncoder = null;
+
+        RefreshDerived();
+    }
+
+    private void OnRequiredEncoderChanged(ChangeEventArgs e)
+    {
+        var value = Str(e).Trim();
+        _draft.RequiredEncoder = value.Length == 0 ? null : value;
+        RefreshDerived();
+    }
+
+    private void OnTargetCodecChanged(ChangeEventArgs e)
+    {
+        _draft.TargetCodec = Str(e).Trim();
+        RefreshDerived();
+    }
+
+    private void BuildEncoderOptions()
+    {
+        var choices = new List<EncoderChoice>();
+
+        // 1) 编码器族：始终列出，便于为别的机器编写模板
+        foreach (var family in EncoderFamilies)
+        {
+            var profiles = EncoderCatalog.ByFamily(family).ToList();
+            var availableHere = profiles.Count > 0 && profiles.Any(profile =>
+                profile.SupportsCurrentPlatform &&
+                (_availableEncoders is null || _availableEncoders.Contains(profile.Name)));
+
+            choices.Add(new EncoderChoice(
+                family,
+                $"{EncoderCatalog.FamilyDisplayName(family)} · 按族自动挑选{(availableHere ? string.Empty : UnavailableSuffix)}",
+                true));
+        }
+
+        // 2) 具体编码器：以 EncoderCatalog 为准，本机不支持的也保留并写明原因
+        foreach (var profile in EncoderCatalog.Profiles
+                     .OrderByDescending(profile => profile.SupportsCurrentPlatform)
+                     .ThenBy(profile => profile.Family, StringComparer.Ordinal)
+                     .ThenBy(profile => profile.SortPreference))
+        {
+            var machineAvailable = !profile.IsHardware
+                                   || _availableEncoders is null
+                                   || _availableEncoders.Contains(profile.Name);
+            var available = profile.SupportsCurrentPlatform && machineAvailable;
+
+            var suffix = available ? string.Empty : $"{UnavailableSuffix}（{UnavailableReason(profile)}）";
+            choices.Add(new EncoderChoice(profile.Name, $"{profile.Name} · {profile.DisplayName}{suffix}", false));
+        }
+
+        _encoderOptions = choices;
+    }
+
+    private static string UnavailableReason(EncoderProfile profile)
+    {
+        if (!profile.SupportsCurrentPlatform)
+        {
+            var platforms = profile.Family switch
+            {
+                "nvenc" or "amf" or "vulkan" => "Windows / Linux",
+                "videotoolbox" => "macOS",
+                "vaapi" => "Linux",
+                "mf" => "Windows",
+                _ => "其它平台"
+            };
+            return $"仅 {platforms} 可用";
+        }
+
+        return "本机未检测到可用硬件";
+    }
+
+    private IEnumerable<EncoderChoice> FamilyEncoderChoices => _encoderOptions.Where(choice => choice.IsFamily);
+
+    private IEnumerable<EncoderChoice> ConcreteEncoderChoices => _encoderOptions.Where(choice => !choice.IsFamily);
+
+    /// <summary>当前值不在目录里时（例如旧模板手写的编码器名）补一个选项，避免下拉框显示为空</summary>
+    private EncoderChoice? UnknownEncoderOption
+    {
+        get
+        {
+            var value = _draft.RequiredEncoder?.Trim();
+            if (string.IsNullOrEmpty(value)) return null;
+            if (_encoderOptions.Any(choice => string.Equals(choice.Value, value, StringComparison.OrdinalIgnoreCase))) return null;
+
+            return new EncoderChoice(value, $"{value}（不在编码器目录中）", false);
+        }
+    }
+
+    private string DetectionLabel => _detectedAt is { } detectedAt
+        ? detectedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
+        : string.Empty;
+
+    private sealed record CodecChoice(string Value, string Label);
+
+    private List<CodecChoice> CodecChoices { get; } = EncoderCatalog.Profiles
+        .Select(profile => profile.Codec)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Select(codec => new CodecChoice(codec, CodecLabel(codec)))
+        .ToList();
+
+    private static string CodecLabel(string codec) => codec.ToLowerInvariant() switch
+    {
+        "h264" => "H.264 / AVC",
+        "hevc" => "H.265 / HEVC",
+        "av1" => "AV1",
+        "vp9" => "VP9",
+        "vp8" => "VP8",
+        "prores" => "ProRes",
+        "aac" => "AAC（音频）",
+        "mp3" => "MP3（音频）",
+        "opus" => "Opus（音频）",
+        "flac" => "FLAC（音频）",
+        _ => codec
+    };
+
+    // ────────────────────────────────────────────────────────────────
+    // 内置占位符目录（说明文字 + 分组）
+    // ────────────────────────────────────────────────────────────────
+
+    private sealed record PlaceholderInfo(string Name, string Description);
+
+    private sealed record PlaceholderGroup(string Title, IReadOnlyList<PlaceholderInfo> Items);
+
+    private static readonly (string Group, string Name, string Description)[] PlaceholderDocs =
+    [
+        ("路径类", "input", "输入文件的完整路径"),
+        ("路径类", "output", "输出文件的完整路径（由输入文件名 + 输出扩展名生成）"),
+        ("路径类", "input_dir", "输入文件所在目录"),
+        ("路径类", "input_name", "不带扩展名的输入文件名"),
+        ("路径类", "input_filename", "含扩展名的输入文件名"),
+        ("路径类", "input_ext", "输入扩展名（如 mp4，不含点）"),
+        ("路径类", "output_dir", "输出文件所在目录"),
+        ("路径类", "output_name", "不带扩展名的输出文件名"),
+        ("路径类", "output_ext", "输出扩展名（如 mp4，不含点）"),
+
+        ("媒体信息类", "duration", "输入文件时长（秒）"),
+        ("媒体信息类", "width", "输入视频宽度（像素）"),
+        ("媒体信息类", "height", "输入视频高度（像素）"),
+        ("媒体信息类", "fps", "输入视频帧率"),
+        ("媒体信息类", "vcodec", "输入视频编码格式名"),
+        ("媒体信息类", "acodec", "输入音频编码格式名"),
+        ("媒体信息类", "sample_rate", "音频采样率（没有音频信息时为 44100）"),
+        ("媒体信息类", "channels", "音频声道数（没有音频信息时为 2）"),
+
+        ("编码器类", "encoder", "按目标格式与本机硬件自动选出的视频编码器名（如 h264_nvenc / libx264）"),
+        ("编码器类", "audio_encoder", "音频编码器名（默认 aac）"),
+        ("编码器类", "crf", "质量数值（等价于 quality，可被同名参数覆盖）"),
+        ("编码器类", "quality", "质量数值，通常由一个名为 quality 的参数驱动"),
+        ("编码器类", "q", "质量数值的简写"),
+        ("编码器类", "quality_args", "当前编码器的完整质量参数（-crf 23 / -cq 23 / -qp 23 …），需要配合 encoder 使用"),
+        ("编码器类", "preset_args", "当前编码器的预设参数（如 -preset medium），与 encoder 配套"),
+        ("编码器类", "hwupload_args", "显存上传滤镜（如 format=nv12,hwupload），VA-API 等需要；模板已写 -vf 时会自动并入"),
+        ("编码器类", "device_args", "编码器所需的设备初始化参数（如 -vaapi_device /dev/dri/renderD128），由系统自动插入"),
+        ("编码器类", "muxer_args", "容器兼容参数（如 HEVC 入 MP4 需要的 -tag:v hvc1），由系统自动插入"),
+        ("编码器类", "threads", "线程数（未设置时为空）"),
+        ("编码器类", "hwaccel", "硬件解码参数（如 -hwaccel videotoolbox，未启用时为空）"),
+
+        ("时间类", "date", "当前日期 yyyyMMdd"),
+        ("时间类", "time", "当前时间 HHmmss"),
+        ("时间类", "datetime", "当前日期时间 yyyyMMdd_HHmmss"),
+        ("时间类", "random", "随机 8 位十六进制字符串（避免输出文件重名）"),
+    ];
+
+    private static readonly string[] PlaceholderGroupOrder = ["路径类", "媒体信息类", "编码器类", "时间类", "其他"];
+
+    private static readonly List<PlaceholderGroup> PlaceholderGroups = BuildPlaceholderGroups();
+
+    private static List<PlaceholderGroup> BuildPlaceholderGroups()
+    {
+        var known = new HashSet<string>(PlaceholderDocs.Select(doc => doc.Name), StringComparer.OrdinalIgnoreCase);
+        var groups = new List<PlaceholderGroup>();
+
+        foreach (var title in PlaceholderGroupOrder)
+        {
+            var items = PlaceholderDocs
+                .Where(doc => doc.Group == title && CommandLineBuilder.BuiltInPlaceholders.Contains(doc.Name))
+                .Select(doc => new PlaceholderInfo(doc.Name, doc.Description))
+                .DistinctBy(info => info.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (title == "其他")
+            {
+                // 兜底：BuiltInPlaceholders 里新增、而这里还没写说明的占位符也必须出现在调色板中
+                items.AddRange(CommandLineBuilder.BuiltInPlaceholders
+                    .Where(name => !known.Contains(name))
+                    .OrderBy(name => name, StringComparer.Ordinal)
+                    .Select(name => new PlaceholderInfo(name, "系统提供的占位符")));
+            }
+
+            if (items.Count > 0) groups.Add(new PlaceholderGroup(title, items));
+        }
+
+        return groups;
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 复制 / 试运行 / 保存
+    // ────────────────────────────────────────────────────────────────
+
+    private static string FormatDuration(TimeSpan value) =>
+        value <= TimeSpan.Zero ? "—" : value.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) + " 秒";
+
+    private async Task CopyCommandAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_previewCommand)) return;
+
+        try
+        {
+            var ok = await JS.InvokeAsync<bool>("ffui.copyText", "ffmpeg " + _previewCommand);
+            if (ok) Toast.Success("命令已复制到剪贴板");
+            else Toast.Error("复制失败：浏览器不允许访问剪贴板，请手动选中命令文本后复制。");
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"复制失败：{ex.Message}");
+        }
+    }
+
+    private async Task RunTestAsync()
+    {
+        if (_isTesting) return;
+
+        NormalizeDraft();
+        RefreshDerived();
+
+        _isTesting = true;
+        _testResult = null;
+
+        try
+        {
+            _testResult = await TemplateService.TestTemplateAsync(_draft);
+            if (_testResult.Success) Toast.Success("模板试运行成功，该模板在本机可以跑通");
+            else Toast.Error("模板试运行失败，请看下方详情");
+        }
+        catch (Exception ex)
+        {
+            _testResult = new TemplateTestResult(false, $"试运行出错：{ex.Message}", string.Empty, string.Empty, TimeSpan.Zero);
+            Toast.Error($"试运行出错：{ex.Message}");
+        }
+        finally
+        {
+            _isTesting = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_isSaving) return; // 防止双击 / 重复提交
+
+        NormalizeDraft();
+        RefreshDerived();
+
+        if (ErrorCount > 0)
+        {
+            Toast.Warning($"还有 {ErrorCount} 个错误未修正，无法保存。");
+            return;
+        }
 
         _isSaving = true;
 
         try
         {
-            if (_isEditing)
+            // 用数据库里是否真的存在这个 Id 来决定「新建」还是「更新」，
+            // 不依赖父组件传进来的是 null 还是一个空的 CommandTemplate。
+            var isNew = await TemplateService.GetTemplateByIdAsync(_draft.Id) is null;
+            _isNew = isNew;
+
+            var saved = _draft;
+
+            if (IsSystem)
             {
-                var success = await TemplateService.UpdateTemplateAsync(_template);
-                if (!success)
+                if (isNew)
                 {
-                    _saveError = "更新失败，系统模板不可编辑";
-                    _isSaving = false;
+                    saved = await TemplateService.CreateSystemTemplateAsync(_draft);
+                }
+                else if (!await TemplateService.UpdateSystemTemplateAsync(_draft))
+                {
+                    Toast.Error("保存失败：系统预设可能已被删除，请刷新页面后重试。");
                     return;
                 }
             }
             else
             {
-                await TemplateService.CreateTemplateAsync(_template);
+                if (isNew)
+                {
+                    saved = await TemplateService.CreateTemplateAsync(_draft);
+                }
+                else if (!await TemplateService.UpdateTemplateAsync(_draft))
+                {
+                    Toast.Error("保存失败：模板可能已被删除，或它是系统预设（系统预设请在系统模板管理中编辑）。");
+                    return;
+                }
             }
 
-            _isVisible = false;
-            await OnSaved.InvokeAsync();
+            var finalName = string.IsNullOrWhiteSpace(saved?.Name) ? _draft.Name : saved!.Name;
+            Toast.Success($"模板「{finalName}」已保存");
+
+            // 已写进数据库，关闭时不再提示「未保存的修改」
+            _originalFingerprint = Fingerprint(_draft);
+
+            await OnSaved.InvokeAsync(saved ?? _draft);
+            await CloseModalAsync();
         }
         catch (Exception ex)
         {
-            _saveError = $"保存失败: {ex.Message}";
+            Toast.Error($"保存失败：{ex.Message}");
         }
         finally
         {
@@ -245,214 +1985,143 @@
         }
     }
 
-    private async Task FocusFirstError()
+    /// <summary>保存 / 试运行前统一规范化一次（与服务端 NormalizeTemplate 的行为保持一致）</summary>
+    private void NormalizeDraft()
     {
-        await Task.Delay(50); // 等待 DOM 更新
-        
-        if (_fieldErrors.ContainsKey("Name"))
-            await _nameInput.FocusAsync();
-        else if (_fieldErrors.ContainsKey("Category"))
-            await _categoryInput.FocusAsync();
-        else if (_fieldErrors.ContainsKey("CommandArgs"))
-            await _commandArgsInput.FocusAsync();
-        else if (_fieldErrors.ContainsKey("OutputExtension"))
-            await _outputExtInput.FocusAsync();
+        _draft.Name = (_draft.Name ?? string.Empty).Trim().Trim('{', '}');
+        _draft.Description = (_draft.Description ?? string.Empty).Trim();
+        _draft.CommandArgs = (_draft.CommandArgs ?? string.Empty).Trim();
+        _draft.Category = (_draft.Category ?? string.Empty).Trim();
+        _draft.OutputExtension = NormalizeExtension(_draft.OutputExtension);
+        _draft.TargetCodec = (_draft.TargetCodec ?? string.Empty).Trim();
+        _draft.RequiredEncoder = string.IsNullOrWhiteSpace(_draft.RequiredEncoder) ? null : _draft.RequiredEncoder.Trim();
+        _draft.RequiresHardwareAcceleration = _draft.HardwareMode == HardwareAccelerationMode.Required;
+        if (_draft.HardwareMode == HardwareAccelerationMode.None) _draft.RequiredEncoder = null;
+
+        _draft.SupportedInputFormats = SplitFormats(_inputFormatsText);
+        _inputFormatsText = string.Join(", ", _draft.SupportedInputFormats);
+        _draft.Tags = SplitTags(_tagsText);
+        _tagsText = string.Join(", ", _draft.Tags);
+
+        foreach (var parameter in _draft.Parameters)
+        {
+            parameter.Name = NormalizePlaceholderName(parameter.Name);
+            parameter.Label = (parameter.Label ?? string.Empty).Trim();
+            parameter.Description = (parameter.Description ?? string.Empty).Trim();
+            parameter.DefaultValue ??= string.Empty;
+
+            foreach (var option in parameter.Options)
+            {
+                option.Value = (option.Value ?? string.Empty).Trim();
+                option.Label = string.IsNullOrWhiteSpace(option.Label) ? option.Value : option.Label.Trim();
+                option.Description = (option.Description ?? string.Empty).Trim();
+            }
+        }
     }
 
-    private void Close()
+    // ────────────────────────────────────────────────────────────────
+    // 深拷贝 / 脏检查
+    // ────────────────────────────────────────────────────────────────
+
+    private static CommandTemplate CloneTemplate(CommandTemplate? source)
     {
-        _isVisible = false;
-        _fieldErrors.Clear();
+        var clone = new CommandTemplate();
+
+        if (source is null) return clone;
+
+        clone.Id = source.Id ?? ObjectId.NewObjectId();
+        clone.Name = source.Name ?? string.Empty;
+        clone.Description = source.Description ?? string.Empty;
+        clone.CommandArgs = source.CommandArgs ?? string.Empty;
+        clone.Type = source.Type;
+        clone.Category = source.Category ?? string.Empty;
+        clone.SupportedInputFormats = source.SupportedInputFormats is null
+            ? new List<string>()
+            : [.. source.SupportedInputFormats];
+        clone.OutputExtension = source.OutputExtension ?? string.Empty;
+        clone.TargetCodec = source.TargetCodec ?? string.Empty;
+        clone.HardwareMode = source.HardwareMode;
+        clone.RequiresHardwareAcceleration = source.HardwareMode == HardwareAccelerationMode.Required;
+        clone.RequiredEncoder = source.RequiredEncoder;
+        clone.Parameters = source.Parameters is null ? new List<TemplateParameter>() : source.Parameters
+            .Select(parameter => new TemplateParameter
+            {
+                Name = parameter.Name ?? string.Empty,
+                Label = parameter.Label ?? string.Empty,
+                Description = parameter.Description ?? string.Empty,
+                Kind = parameter.Kind,
+                DefaultValue = parameter.DefaultValue ?? string.Empty,
+                Options = parameter.Options is null
+                    ? new List<TemplateParameterOption>()
+                    : parameter.Options
+                        .Select(option => new TemplateParameterOption(
+                            option.Value ?? string.Empty,
+                            option.Label ?? string.Empty,
+                            option.Description ?? string.Empty))
+                        .ToList(),
+                Min = parameter.Min,
+                Max = parameter.Max,
+                TrueValue = parameter.TrueValue ?? string.Empty,
+                FalseValue = parameter.FalseValue ?? string.Empty
+            })
+            .ToList();
+        clone.Tags = source.Tags is null ? new List<string>() : [.. source.Tags];
+        clone.IsRecommended = source.IsRecommended;
+        clone.PresetVersion = source.PresetVersion;
+        clone.CreatedAt = source.CreatedAt;
+        clone.UpdatedAt = source.UpdatedAt;
+        clone.SortOrder = source.SortOrder;
+
+        return clone;
+    }
+
+    /// <summary>把模板序列化成稳定字符串，用来判断是否有未保存的修改</summary>
+    private static string Fingerprint(CommandTemplate template)
+    {
+        var builder = new StringBuilder();
+
+        void Field(string? value) => builder.Append(value ?? string.Empty).Append('\u001f');
+
+        Field(template.Name);
+        Field(template.Description);
+        Field(template.CommandArgs);
+        Field(template.Category);
+        Field(template.OutputExtension);
+        Field(template.TargetCodec);
+        Field(((int)template.HardwareMode).ToString(CultureInfo.InvariantCulture));
+        Field(template.RequiredEncoder);
+        Field(template.SortOrder.ToString(CultureInfo.InvariantCulture));
+        Field(template.IsRecommended ? "1" : "0");
+
+        builder.Append('\u001e');
+        foreach (var format in template.SupportedInputFormats) Field(format);
+
+        builder.Append('\u001e');
+        foreach (var tag in template.Tags) Field(tag);
+
+        builder.Append('\u001e');
+        foreach (var parameter in template.Parameters)
+        {
+            Field(parameter.Name);
+            Field(parameter.Label);
+            Field(parameter.Description);
+            Field(((int)parameter.Kind).ToString(CultureInfo.InvariantCulture));
+            Field(parameter.DefaultValue);
+            Field(parameter.TrueValue);
+            Field(parameter.FalseValue);
+            Field(parameter.Min?.ToString("R", CultureInfo.InvariantCulture));
+            Field(parameter.Max?.ToString("R", CultureInfo.InvariantCulture));
+
+            foreach (var option in parameter.Options)
+            {
+                Field(option.Value);
+                Field(option.Label);
+                Field(option.Description);
+            }
+
+            builder.Append('\u001d');
+        }
+
+        return builder.ToString();
     }
 }
-
-<style>
-    .template-editor {
-        display: none;
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 1000;
-    }
-
-    .template-editor.visible {
-        display: block;
-    }
-
-    .editor-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.5);
-    }
-
-    .editor-panel {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        width: 90%;
-        max-width: 600px;
-        max-height: 90vh;
-        background: var(--card-bg, white);
-        border-radius: 8px;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        color: var(--text-primary, #333);
-    }
-
-    .editor-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 1rem 1.5rem;
-        border-bottom: 1px solid var(--border-color, #ddd);
-        background: var(--light-bg, #f8f9fa);
-    }
-
-    .editor-header h2 {
-        margin: 0;
-        font-size: 1.25rem;
-        color: var(--text-primary, #333);
-    }
-
-    .close-btn {
-        background: none;
-        border: none;
-        font-size: 1.5rem;
-        cursor: pointer;
-        color: var(--text-secondary, #666);
-    }
-
-    .close-btn:hover {
-        color: var(--text-primary, #333);
-    }
-
-    .editor-body {
-        flex: 1;
-        padding: 1.5rem;
-        overflow-y: auto;
-    }
-
-    .form-group {
-        margin-bottom: 1rem;
-    }
-
-    .form-group label {
-        display: block;
-        font-weight: 500;
-        margin-bottom: 0.5rem;
-        color: var(--text-primary, #333);
-    }
-
-    .form-group input,
-    .form-group textarea,
-    .form-group select {
-        width: 100%;
-        padding: 0.6rem;
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 4px;
-        font-size: 0.95rem;
-        background: var(--input-bg, white);
-        color: var(--text-primary, #333);
-    }
-
-    .form-group input::placeholder,
-    .form-group textarea::placeholder {
-        color: var(--text-muted, #888);
-    }
-
-    .form-group.checkbox label {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        cursor: pointer;
-    }
-
-    .form-group.checkbox input {
-        width: auto;
-    }
-
-    .form-row {
-        display: flex;
-        gap: 1rem;
-    }
-
-    .form-group.half {
-        flex: 1;
-    }
-
-    .help-text {
-        display: block;
-        font-size: 0.8rem;
-        color: var(--text-muted, #888);
-        margin-top: 0.25rem;
-    }
-
-    .form-group.has-error input,
-    .form-group.has-error textarea,
-    .form-group.has-error select {
-        border-color: #dc3545;
-        background-color: #fff8f8;
-    }
-
-    .field-error {
-        display: block;
-        font-size: 0.85rem;
-        color: #dc3545;
-        margin-top: 0.25rem;
-    }
-
-    .error-message {
-        padding: 0.75rem;
-        background: #f8d7da;
-        color: #721c24;
-        border-radius: 4px;
-    }
-
-    .editor-footer {
-        display: flex;
-        justify-content: flex-end;
-        gap: 0.75rem;
-        padding: 1rem 1.5rem;
-        border-top: 1px solid var(--border-color, #ddd);
-        background: var(--light-bg, #f8f9fa);
-    }
-
-    .btn-primary,
-    .btn-secondary {
-        padding: 0.6rem 1.5rem;
-        border-radius: 4px;
-        font-size: 0.95rem;
-        cursor: pointer;
-    }
-
-    .btn-primary {
-        background: #007bff;
-        color: white;
-        border: none;
-    }
-
-    .btn-primary:hover:not(:disabled) {
-        background: #0056b3;
-    }
-
-    .btn-primary:disabled {
-        background: #ccc;
-    }
-
-    .btn-secondary {
-        background: var(--light-bg, #f8f9fa);
-        border: 1px solid var(--border-color, #ddd);
-        color: var(--text-primary, #333);
-    }
-
-    .btn-secondary:hover {
-        background: var(--card-bg, #e9ecef);
-    }
-</style>

@@ -1,432 +1,1010 @@
-@using FFmpegWebUI.Models
+@*
+    模板详情查看器
 
-<div class="template-detail-viewer @(_isVisible ? "visible" : "")">
-    <div class="viewer-overlay" @onclick="Close"></div>
-    <div class="viewer-panel">
-        <div class="viewer-header">
-            <h2>📋 模板详情</h2>
-            <button class="close-btn" @onclick="Close">✕</button>
-        </div>
+    · 使用共享 <Modal>（Esc / 遮罩 / role="dialog" / 初始焦点都由它负责），不再手写遮罩层。
+    · 可用性来自 IHardwareDetectionService 的真实检测报告；Auto 模式会显示最终会选中的编码器。
+    · 支持父组件通过 ParameterValues/ParameterValuesChanged 接入参数编辑，并给出实时「命令预览」。
+    · 兼容旧的 @ref + Open(template) 调用方式（内部状态，不改 [Parameter]）。
+*@
+@inject IFFmpegService FFmpegService
+@inject ITemplateService TemplateService
+@inject IHardwareDetectionService HardwareDetectionService
+@inject IJSRuntime JS
+@inject IToastService Toast
+@implements IDisposable
 
-        @if (_template != null)
+<Modal Title="@TitleText" Size="lg" IsOpen="Visible" IsOpenChanged="OnOpenChanged">
+    @if (Current == null)
+    {
+        <div class="ffui-empty-state">没有可显示的模板。</div>
+    }
+    else
+    {
+        @if (_availabilityError != null)
         {
-            <div class="viewer-body">
-                <div class="detail-section">
-                    <div class="detail-row">
-                        <span class="label">模板名称</span>
-                        <span class="value name">@_template.Name</span>
-                    </div>
+            <div class="ffui-alert ffui-alert-warning body-alert" role="status">@_availabilityError</div>
+        }
 
-                    <div class="detail-row">
-                        <span class="label">类型</span>
-                        <span class="value">
-                            @if (_template.Type == TemplateType.System)
-                            {
-                                <span class="badge system">系统预设</span>
-                            }
-                            else
-                            {
-                                <span class="badge user">用户自定义</span>
-                            }
-                        </span>
-                    </div>
-
-                    <div class="detail-row">
-                        <span class="label">分类</span>
-                        <span class="value">📂 @_template.Category</span>
-                    </div>
-
-                    <div class="detail-row">
-                        <span class="label">描述</span>
-                        <span class="value desc">@(string.IsNullOrEmpty(_template.Description) ? "无描述" : _template.Description)</span>
-                    </div>
-                </div>
-
-                <div class="detail-section">
-                    <div class="detail-row full">
-                        <div class="command-header">
-                            <span class="label">FFmpeg 命令参数</span>
-                            <button class="copy-btn-header @(_copied ? "copied" : "")" @onclick="CopyCommand" title="复制命令">
-                                @if (_copied)
-                                {
-                                    <span>✓ 已复制</span>
-                                }
-                                else
-                                {
-                                    <span>📋 复制</span>
-                                }
-                            </button>
-                        </div>
-                        <div class="command-box">
-                            <code>@_template.CommandArgs</code>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="detail-section">
-                    <div class="detail-row">
-                        <span class="label">输出格式</span>
-                        <span class="value">.@_template.OutputExtension</span>
-                    </div>
-
-                    <div class="detail-row">
-                        <span class="label">支持的输入格式</span>
-                        <span class="value">
-                            @if (_template.SupportedInputFormats.Count > 0)
-                            {
-                                @string.Join(", ", _template.SupportedInputFormats.Select(f => $".{f}"))
-                            }
-                            else
-                            {
-                                <span class="muted">不限制</span>
-                            }
-                        </span>
-                    </div>
-
-                    <div class="detail-row">
-                        <span class="label">硬件加速</span>
-                        <span class="value">
-                            @if (_template.RequiresHardwareAcceleration)
-                            {
-                                <span class="badge hw">🚀 需要</span>
-                                @if (!string.IsNullOrEmpty(_template.RequiredEncoder))
-                                {
-                                    <span>(@_template.RequiredEncoder)</span>
-                                }
-                            }
-                            else
-                            {
-                                <span class="muted">不需要</span>
-                            }
-                        </span>
-                    </div>
-                </div>
-
-                <div class="detail-section">
-                    <div class="detail-row">
-                        <span class="label">创建时间</span>
-                        <span class="value">@_template.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
-                    </div>
-
-                    <div class="detail-row">
-                        <span class="label">更新时间</span>
-                        <span class="value">@_template.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
-                    </div>
-
-                    <div class="detail-row">
-                        <span class="label">排序权重</span>
-                        <span class="value">@_template.SortOrder</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="viewer-footer">
-                @if (_template.Type == TemplateType.System)
-                {
-                    <button class="btn-copy" @onclick="OnCopyClick">
-                        📋 复制为自定义模板
-                    </button>
-                }
-                else
-                {
-                    <button class="btn-edit" @onclick="OnEditClick">
-                        ✏️ 编辑模板
-                    </button>
-                }
-                <button class="btn-secondary" @onclick="Close">关闭</button>
+        @if (IsUnavailable)
+        {
+            <div class="ffui-alert ffui-alert-warning body-alert" role="alert">
+                <span>
+                    该模板必须使用 @(EncoderCatalog.FamilyDisplayName(RequiredFamily ?? "")) 硬件编码，
+                    本机不可用：@MissingFamilyReason
+                </span>
             </div>
         }
+
+        <div class="detail-section">
+            <h4 class="ffui-section-title">基本信息</h4>
+
+            <div class="detail-row">
+                <span class="label">模板名称</span>
+                <span class="value name">@Current.Name</span>
+            </div>
+
+            <div class="detail-row">
+                <span class="label">类型</span>
+                <span class="value">
+                    <span class="ffui-badge @(IsSystem ? "" : "ffui-badge-success")">
+                        @(IsSystem ? "系统预设" : "用户自定义")
+                    </span>
+                </span>
+            </div>
+
+            <div class="detail-row">
+                <span class="label">分类</span>
+                <span class="value">📂 @Current.Category</span>
+            </div>
+
+            <div class="detail-row">
+                <span class="label">描述</span>
+                <span class="value desc">@(string.IsNullOrEmpty(Current.Description) ? "无描述" : Current.Description)</span>
+            </div>
+        </div>
+
+        <div class="detail-section">
+            <h4 class="ffui-section-title">命令与预览</h4>
+
+            <div class="command-header">
+                <span class="label">FFmpeg 命令参数</span>
+                <button type="button" class="ffui-btn ffui-btn-sm" aria-label="复制命令参数" @onclick="CopyCommandAsync">
+                    <span aria-live="polite">@(_copied ? "✓ 已复制" : "📋 复制")</span>
+                </button>
+            </div>
+            <div class="command-box">
+                <code>@Current.CommandArgs</code>
+            </div>
+            <span class="visually-hidden" role="status" aria-live="polite">@_copyStatus</span>
+
+            <div class="command-header preview-header">
+                <span class="label">命令预览</span>
+                <span class="hint">用占位符拼出的实际命令行，参数改动会立即反映在这里</span>
+            </div>
+
+            @if (_previewError != null)
+            {
+                <div class="ffui-alert ffui-alert-danger" role="alert">@_previewError</div>
+            }
+            else if (_preview == null)
+            {
+                <div class="ffui-loading-row" role="status">
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span>正在生成命令预览…</span>
+                </div>
+            }
+            else
+            {
+                <div class="command-box preview">
+                    <code>@_preview</code>
+                </div>
+
+                @if (_previewWarnings.Count > 0)
+                {
+                    <ul class="warning-list">
+                        @foreach (var warning in _previewWarnings)
+                        {
+                            <li @key="warning">⚠ @warning</li>
+                        }
+                    </ul>
+                }
+            }
+        </div>
+
+        <div class="detail-section">
+            <h4 class="ffui-section-title">参数</h4>
+
+            @if (!HasParameters)
+            {
+                <span class="muted">该模板没有可调参数</span>
+            }
+            else if (ParameterValuesChanged.HasDelegate)
+            {
+                <TemplateParameterEditor Template="Current" Values="_values" ValuesChanged="OnValuesChanged" />
+            }
+            else
+            {
+                <ul class="param-readonly">
+                    @foreach (var parameter in Parameters)
+                    {
+                        <li @key="parameter.Name">
+                            <span class="param-name">@parameter.Label</span>
+                            <span class="param-kind">@KindText(parameter.Kind)</span>
+                            @if (!string.IsNullOrEmpty(parameter.DefaultValue))
+                            {
+                                <span class="param-default">默认：@parameter.DefaultValue</span>
+                            }
+                            @if (!string.IsNullOrEmpty(parameter.Description))
+                            {
+                                <span class="param-desc">@parameter.Description</span>
+                            }
+                        </li>
+                    }
+                </ul>
+                <span class="hint">只读展示：父页面未提供 ParameterValuesChanged，暂时无法在此调整参数。</span>
+            }
+        </div>
+
+        <div class="detail-section">
+            <h4 class="ffui-section-title">格式</h4>
+
+            <div class="detail-row">
+                <span class="label">输出格式</span>
+                <span class="value">.@Current.OutputExtension</span>
+            </div>
+
+            <div class="detail-row">
+                <span class="label">支持的输入格式 <span class="label-note">参考信息</span></span>
+                <span class="value">
+                    @if (Current.SupportedInputFormats.Count > 0)
+                    {
+                        @InputFormatsText
+                    }
+                    else
+                    {
+                        <span class="muted">不限制</span>
+                    }
+                    <span class="hint">该列表只是参考资料，并不强制校验；能否处理取决于 FFmpeg 与源文件编码。</span>
+                </span>
+            </div>
+        </div>
+
+        <div class="detail-section">
+            <h4 class="ffui-section-title">硬件加速</h4>
+
+            @if (_report == null)
+            {
+                <div class="ffui-loading-row" role="status">
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span>正在读取本机硬件编码能力…</span>
+                </div>
+            }
+            else
+            {
+                <div class="detail-row">
+                    <span class="label">策略</span>
+                    <span class="value">@ModeText</span>
+                </div>
+
+                @if (ShowsFamilyRow)
+                {
+                    <div class="detail-row">
+                        <span class="label">编码器族</span>
+                        <span class="value">
+                            @if (RequiredFamily == null)
+                            {
+                                <span class="ffui-badge ffui-badge-danger">✗ 不可用</span>
+                                <span class="muted">模板未指定编码器族</span>
+                            }
+                            else
+                            {
+                                <span class="ffui-badge @(FamilySatisfied ? "ffui-badge-success" : "ffui-badge-danger")">
+                                    @(FamilySatisfied ? "✓ 可用" : "✗ 不可用")
+                                </span>
+                                <span class="family-name">@(EncoderCatalog.FamilyDisplayName(RequiredFamily))</span>
+                                <span class="muted">@FamilyDetail</span>
+                            }
+                        </span>
+                    </div>
+                }
+
+                @if (ShowsEncoderChoice)
+                {
+                    <div class="detail-row">
+                        <span class="label">将使用的编码器</span>
+                        <span class="value">
+                            <span class="ffui-badge @(IsResolvedHardware ? "ffui-badge-success" : "")">@ResolvedEncoderName</span>
+                            <span class="muted">@ResolvedEncoderNote</span>
+                        </span>
+                    </div>
+                }
+            }
+        </div>
+
+        <div class="detail-section">
+            <h4 class="ffui-section-title">其它</h4>
+
+            @if (IsSystem)
+            {
+                <div class="detail-row">
+                    <span class="label">创建时间</span>
+                    <span class="value muted">系统预设</span>
+                </div>
+            }
+            else if (HasCreatedAt)
+            {
+                <div class="detail-row">
+                    <span class="label">创建时间</span>
+                    <span class="value">@Current.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                </div>
+            }
+
+            @if (HasUpdatedAt)
+            {
+                <div class="detail-row">
+                    <span class="label">更新时间</span>
+                    <span class="value">@Current.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                </div>
+            }
+
+            <div class="detail-row">
+                <span class="label">排序权重</span>
+                <span class="value">@Current.SortOrder</span>
+            </div>
+        </div>
+    }
+
+    <div class="ffui-modal-footer">
+        <button type="button" class="ffui-btn ffui-btn-ghost footer-left"
+                disabled="@(_isRefreshing || Current == null)" @onclick="RefreshAsync">
+            @if (_isRefreshing)
+            {
+                <span class="spinner" aria-hidden="true"></span>
+            }
+            ↻ 重新读取
+        </button>
+        <button type="button" class="ffui-btn" @onclick="CloseAsync">关闭</button>
+        <button type="button" class="ffui-btn" aria-label="复制命令参数"
+                disabled="@(Current == null)" @onclick="CopyCommandAsync">
+            📋 复制命令
+        </button>
+
+        @if (IsSystem)
+        {
+            <button type="button" class="ffui-btn" disabled="@(Current == null)"
+                    @onclick="CopyAsTemplateAsync">
+                📑 复制为自定义模板
+            </button>
+        }
+        else
+        {
+            <button type="button" class="ffui-btn" disabled="@(Current == null)"
+                    @onclick="EditTemplateAsync">
+                ✏️ 编辑模板
+            </button>
+        }
+
+        <button type="button" class="ffui-btn ffui-btn-primary"
+                disabled="@(Current == null || IsUnavailable)"
+                title="@(IsUnavailable ? UnavailableTitle : null)"
+                @onclick="UseTemplateAsync">
+            🚀 使用此模板
+        </button>
     </div>
-</div>
+</Modal>
 
 @code {
+    // ── 参数 ────────────────────────────────────────────────────────────
+    /// <summary>要查看的模板（受控打开方式）</summary>
+    [Parameter]
+    public CommandTemplate? Template { get; set; }
+
+    /// <summary>是否打开</summary>
+    [Parameter]
+    public bool IsOpen { get; set; }
+
+    /// <summary>打开状态变化回调（配合 @bind-IsOpen）</summary>
+    [Parameter]
+    public EventCallback<bool> IsOpenChanged { get; set; }
+
     [Parameter]
     public EventCallback<CommandTemplate> OnCopy { get; set; }
 
     [Parameter]
     public EventCallback<CommandTemplate> OnEdit { get; set; }
 
-    private CommandTemplate? _template;
-    private bool _isVisible;
-    private bool _copied;
+    /// <summary>「使用此模板」——让详情框不是死胡同</summary>
+    [Parameter]
+    public EventCallback<CommandTemplate> OnUse { get; set; }
 
+    /// <summary>当前参数值；提供后由父组件持有，组件内编辑会通过 ParameterValuesChanged 回传</summary>
+    [Parameter]
+    public Dictionary<string, string>? ParameterValues { get; set; }
+
+    /// <summary>参数值变化回调；提供后才会渲染可编辑的参数控件</summary>
+    [Parameter]
+    public EventCallback<Dictionary<string, string>> ParameterValuesChanged { get; set; }
+
+    // ── 状态 ────────────────────────────────────────────────────────────
+    private CommandTemplate? _override;      // 兼容 Open() 调用与「重新读取」后的最新实例
+    private bool _isOpenInternal;            // 兼容 Open()/Close() 调用（不修改 [Parameter] IsOpen）
+    private string? _loadedKey;
+
+    private Dictionary<string, string> _values = new(StringComparer.OrdinalIgnoreCase);
+    private HardwareDetectionReport? _report;
+    private string? _availabilityError;
+    private EncoderProfile? _resolvedEncoder;
+    private string? _preview;
+    private string? _previewError;
+    private IReadOnlyList<string> _previewWarnings = [];
+
+    private bool _copied;
+    private string _copyStatus = string.Empty;
+    private bool _isRefreshing;
+    private int _loadGeneration;
+    private bool _disposed;
+
+    private CommandTemplate? Current => _override ?? Template;
+
+    private bool Visible => IsOpen || _isOpenInternal;
+
+    private string TitleText => Current == null ? "📋 模板详情" : $"📋 模板详情 · {Current.Name}";
+
+    private bool IsSystem => Current?.Type == TemplateType.System;
+
+    private List<TemplateParameter> Parameters => Current?.Parameters ?? [];
+
+    private bool HasParameters => Parameters.Count > 0;
+
+    /// <summary>「支持的输入格式」展示文本（仅作参考）</summary>
+    private string InputFormatsText
+    {
+        get
+        {
+            var formats = Current?.SupportedInputFormats;
+            if (formats == null || formats.Count == 0) return string.Empty;
+
+            return string.Join(", ", formats.Select(f => "." + f));
+        }
+    }
+
+    private bool HasCreatedAt => Current != null && Current.CreatedAt > DateTime.MinValue;
+
+    private bool HasUpdatedAt => Current != null && Current.UpdatedAt > DateTime.MinValue;
+
+    private HardwareAccelerationMode Mode => Current == null
+        ? HardwareAccelerationMode.None
+        : EffectiveMode(Current);
+
+    private string? RequiredFamily => string.IsNullOrWhiteSpace(Current?.RequiredEncoder)
+        ? null
+        : Current!.RequiredEncoder!.Trim();
+
+    private IReadOnlyList<string> RequiredMembers => RequiredFamily == null ? [] : EncoderCatalog.ExpandFamily(RequiredFamily);
+
+    private string? AvailableFamilyMember => RequiredMembers.FirstOrDefault(IsEncoderAvailable);
+
+    private bool FamilySatisfied => AvailableFamilyMember != null;
+
+    private bool ShowsFamilyRow => RequiredFamily != null || Mode == HardwareAccelerationMode.Required;
+
+    private bool ArgsUsesEncoderPlaceholder =>
+        (Current?.CommandArgs ?? string.Empty).Contains("{encoder}", StringComparison.OrdinalIgnoreCase);
+
+    private bool ShowsEncoderChoice => Mode != HardwareAccelerationMode.None || ArgsUsesEncoderPlaceholder;
+
+    private bool IsUnavailable =>
+        Mode == HardwareAccelerationMode.Required &&
+        _report != null &&
+        (RequiredFamily == null || !FamilySatisfied);
+
+    private string UnavailableTitle => RequiredFamily == null
+        ? "模板未指定编码器族，无法确认硬件可用性"
+        : $"{EncoderCatalog.FamilyDisplayName(RequiredFamily)} 硬件编码器在本机不可用：{MissingFamilyReason}";
+
+    private string ModeText => Mode switch
+    {
+        HardwareAccelerationMode.Required => "必须使用硬件编码器（本机不可用时该模板不可用）",
+        HardwareAccelerationMode.Auto => "自动：优先使用硬件编码器，没有可用硬件时回退到软件编码",
+        _ => "不使用硬件加速（使用模板中指定的编码器）"
+    };
+
+    private string FamilyDetail => RequiredFamily == null
+        ? "模板未指定编码器族"
+        : FamilySatisfied
+            ? $"将使用 {DescribeEncoder(AvailableFamilyMember!)}"
+            : MissingFamilyReason;
+
+    private string ResolvedEncoderName => _resolvedEncoder == null
+        ? "未解析"
+        : DescribeEncoder(_resolvedEncoder.Name);
+
+    /// <summary>解析出的编码器是否为硬件编码（用于徽标配色）</summary>
+    private bool IsResolvedHardware => _resolvedEncoder?.IsHardware == true;
+
+    private string ResolvedEncoderNote
+    {
+        get
+        {
+            if (_resolvedEncoder == null) return "（模板未使用 {encoder}，由模板内固定编码器决定）";
+
+            if (Mode == HardwareAccelerationMode.Required)
+            {
+                return _resolvedEncoder.IsHardware
+                    ? "（模板要求的编码器族可用）"
+                    : "（本机缺少该编码器族，实际执行可能失败）";
+            }
+
+            if (Mode == HardwareAccelerationMode.Auto)
+            {
+                return _resolvedEncoder.IsHardware
+                    ? "（自动选择：本机可用的硬件编码器）"
+                    : "（未检测到可用硬件编码器，回退到软件编码）";
+            }
+
+            return "（按模板中的 {encoder} 占位符解析）";
+        }
+    }
+
+    private string MissingFamilyReason
+    {
+        get
+        {
+            var family = RequiredFamily;
+            if (family == null) return "模板未指定编码器族";
+
+            var detected = RequiredMembers
+                .Select(m => _report?.Encoders.FirstOrDefault(e => string.Equals(e.Name, m, StringComparison.OrdinalIgnoreCase)))
+                .Where(e => e != null)
+                .Select(e => e!)
+                .ToList();
+
+            var reason = detected.Select(e => e.UnavailableReason).FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
+            if (!string.IsNullOrWhiteSpace(reason)) return reason!;
+
+            if (detected.Any(e => e.MissingFromBuild))
+            {
+                return $"当前 FFmpeg 构建不包含 {EncoderCatalog.FamilyDisplayName(family)} 编码器";
+            }
+
+            return $"未检测到可用的 {EncoderCatalog.FamilyDisplayName(family)} 编码器";
+        }
+    }
+
+    // ── 生命周期 ────────────────────────────────────────────────────────
+    protected override void OnParametersSet()
+    {
+        if (!Visible || Current == null) return;
+        _ = EnsureLoadedAsync();
+    }
+
+    public void Dispose()
+    {
+        _disposed = true;
+        _loadGeneration++;
+        _copied = false;
+        _copyStatus = string.Empty;
+    }
+
+    // ── 兼容旧的 @ref 调用方式 ──────────────────────────────────────────
+    /// <summary>打开指定模板（等价于父组件设置 Template + IsOpen）</summary>
     public void Open(CommandTemplate template)
     {
-        _template = template;
+        _override = template;
+        _isOpenInternal = true;
+        _loadedKey = null;
+        _ = EnsureLoadedAsync();
+        StateHasChanged();
+    }
+
+    /// <summary>关闭详情框</summary>
+    public async Task Close() => await CloseAsync();
+
+    private async Task OnOpenChanged(bool open)
+    {
+        // 打开由父组件的 IsOpen 或 Open() 控制；Modal 的 Esc / 遮罩 / 关闭按钮都会走到这里
+        if (open) return;
+        await CloseAsync();
+    }
+
+    private async Task CloseAsync()
+    {
+        _isOpenInternal = false;
+        _override = null;
+        _loadedKey = null;
         _copied = false;
-        _isVisible = true;
-        StateHasChanged();
+        _copyStatus = string.Empty;
+        _loadGeneration++;   // 让仍在等待的加载任务不再触发渲染
+
+        try
+        {
+            await IsOpenChanged.InvokeAsync(false);
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"关闭模板详情失败：{ex.Message}");
+        }
+
+        if (!_disposed) await InvokeAsync(StateHasChanged);
     }
 
-    public void Close()
+    // ── 数据加载 ────────────────────────────────────────────────────────
+    private async Task EnsureLoadedAsync()
     {
-        _isVisible = false;
-        StateHasChanged();
+        var template = Current;
+        if (template == null) return;
+
+        var key = template.Id.ToString();
+        if (string.Equals(_loadedKey, key, StringComparison.Ordinal)) return;
+        _loadedKey = key;
+
+        try
+        {
+            InitializeValues(template);
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"初始化模板参数失败：{ex.Message}");
+        }
+
+        await SafeLoadAsync();
     }
 
-    private async Task CopyCommand()
+    private async Task SafeLoadAsync()
     {
-        // Note: In Blazor Server, clipboard access requires JS interop
-        // For now, we'll just show a visual feedback
+        var generation = ++_loadGeneration;
+
+        try
+        {
+            _availabilityError = null;
+            _report = await HardwareDetectionService.DetectAsync();
+            await RebuildPreviewAsync(resolveEncoder: true);
+        }
+        catch (Exception ex)
+        {
+            _availabilityError = $"读取硬件编码器信息失败：{ex.Message}";
+            Toast.Error(_availabilityError);
+            await RebuildPreviewAsync(resolveEncoder: false);   // 至少给出不含编码器画像的预览
+        }
+
+        if (_disposed || generation != _loadGeneration) return;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void InitializeValues(CommandTemplate template)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (ParameterValues != null)
+        {
+            foreach (var pair in ParameterValues) values[pair.Key] = pair.Value ?? string.Empty;
+        }
+        else
+        {
+            var defaults = TemplateService.CreateDefaultParameterValues(template);
+            foreach (var pair in defaults) values[pair.Key] = pair.Value ?? string.Empty;
+        }
+
+        _values = values;
+    }
+
+    private async Task OnValuesChanged(Dictionary<string, string> values)
+    {
+        _values = values ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        await RebuildPreviewAsync(resolveEncoder: false);
+
+        try
+        {
+            await ParameterValuesChanged.InvokeAsync(_values);
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"参数变更通知失败：{ex.Message}");
+        }
+
+        if (!_disposed) await InvokeAsync(StateHasChanged);
+    }
+
+    // ── 预览 ────────────────────────────────────────────────────────────
+    private async Task RebuildPreviewAsync(bool resolveEncoder)
+    {
+        var template = Current;
+        if (template == null)
+        {
+            _preview = null;
+            _previewError = null;
+            _resolvedEncoder = null;
+            return;
+        }
+
+        try
+        {
+            var encoder = resolveEncoder ? await ResolveEncoderAsync(template) : _resolvedEncoder;
+            if (resolveEncoder) _resolvedEncoder = encoder;
+
+            var context = new CommandContext
+            {
+                InputPath = "<输入文件>",
+                OutputPath = "<输出文件>",
+                Parameters = new Dictionary<string, string>(_values, StringComparer.OrdinalIgnoreCase)
+            };
+
+            // 只有解析出画像时才传 Encoder，避免用错误的画像去展开 {quality_args}
+            if (encoder != null) context.Encoder = encoder;
+
+            var built = FFmpegService.BuildCommand(template, context);
+            _preview = "ffmpeg " + built.CommandLine;
+            _previewWarnings = built.Warnings ?? [];
+            _previewError = null;
+        }
+        catch (Exception ex)
+        {
+            _preview = null;
+            _previewWarnings = [];
+            _previewError = $"命令预览生成失败：{ex.Message}";
+            Toast.Error(_previewError);
+        }
+    }
+
+    private async Task<EncoderProfile?> ResolveEncoderAsync(CommandTemplate template)
+    {
+        var usesPlaceholder = (template.CommandArgs ?? string.Empty)
+            .Contains("{encoder}", StringComparison.OrdinalIgnoreCase);
+
+        if (EffectiveMode(template) == HardwareAccelerationMode.None && !usesPlaceholder)
+        {
+            return null;
+        }
+
+        var codec = DetermineCodec(template);
+        var strict = template.HardwareMode == HardwareAccelerationMode.Required;
+        var name = await HardwareDetectionService.GetRecommendedEncoderAsync(codec, template.RequiredEncoder, strict);
+
+        // 严格模式下返回 null 表示本机缺少该厂商硬件，此时不展示替代编码器
+        return string.IsNullOrEmpty(name)
+            ? null
+            : EncoderCatalog.Find(name) ?? EncoderCatalog.SoftwareFallback(codec);
+    }
+
+    // ── 操作 ────────────────────────────────────────────────────────────
+    private async Task RefreshAsync()
+    {
+        var template = Current;
+        if (template == null) return;
+
+        _isRefreshing = true;
+
+        try
+        {
+            var fresh = await TemplateService.GetTemplateByIdAsync(template.Id);
+            if (fresh == null)
+            {
+                Toast.Warning("该模板已不存在，可能已被删除");
+            }
+            else
+            {
+                _override = fresh;
+                await RebuildPreviewAsync(resolveEncoder: true);
+                Toast.Success("已重新读取模板");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"重新读取模板失败：{ex.Message}");
+        }
+        finally
+        {
+            _isRefreshing = false;
+        }
+
+        if (!_disposed) await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task CopyCommandAsync()
+    {
+        var template = Current;
+        if (template == null) return;
+
+        var text = template.CommandArgs ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            Toast.Warning("该模板没有可复制的命令参数");
+            return;
+        }
+
+        bool copied;
+        try
+        {
+            copied = await JS.InvokeAsync<bool>("ffui.copyText", text);
+        }
+        catch (Exception ex)
+        {
+            _copyStatus = "复制失败";
+            Toast.Error($"复制失败：{ex.Message}");
+            return;
+        }
+
+        if (!copied)
+        {
+            _copyStatus = "复制失败";
+            Toast.Error("复制失败：浏览器拒绝了剪贴板访问，请手动选择命令文本");
+            return;
+        }
+
+        Toast.Success("命令参数已复制到剪贴板");
+        await ShowCopiedAsync();
+    }
+
+    private async Task ShowCopiedAsync()
+    {
         _copied = true;
-        StateHasChanged();
+        _copyStatus = "命令参数已复制";
+        if (!_disposed) await InvokeAsync(StateHasChanged);
+
         await Task.Delay(2000);
+
+        // 组件可能已被销毁（关闭详情框），此时再渲染会抛 ObjectDisposedException
+        if (_disposed) return;
+
         _copied = false;
-        StateHasChanged();
+        _copyStatus = string.Empty;
+        await InvokeAsync(StateHasChanged);
     }
 
-    private async Task OnCopyClick()
+    private async Task CopyAsTemplateAsync() => await InvokeAndCloseAsync(OnCopy, "复制为自定义模板");
+
+    private async Task EditTemplateAsync() => await InvokeAndCloseAsync(OnEdit, "编辑模板");
+
+    private async Task UseTemplateAsync() => await InvokeAndCloseAsync(OnUse, "使用此模板");
+
+    private async Task InvokeAndCloseAsync(EventCallback<CommandTemplate> callback, string action)
     {
-        if (_template != null)
+        var template = Current;
+
+        // 先关闭：回调抛错也不会把用户困在对话框里
+        await CloseAsync();
+
+        if (template == null) return;
+
+        if (!callback.HasDelegate)
         {
-            await OnCopy.InvokeAsync(_template);
-            Close();
+            Toast.Warning($"{action}功能不可用：父页面未提供对应回调");
+            return;
+        }
+
+        try
+        {
+            await callback.InvokeAsync(template);
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"{action}失败：{ex.Message}");
         }
     }
 
-    private async Task OnEditClick()
+    // ── 辅助 ────────────────────────────────────────────────────────────
+    private static HardwareAccelerationMode EffectiveMode(CommandTemplate template)
     {
-        if (_template != null)
+        if (template.HardwareMode != HardwareAccelerationMode.None) return template.HardwareMode;
+
+        // 兼容旧数据：标了「需要硬件加速」且给出了编码器，但 HardwareMode 还没升级成 Required
+        if (template.RequiresHardwareAcceleration && !string.IsNullOrWhiteSpace(template.RequiredEncoder))
         {
-            await OnEdit.InvokeAsync(_template);
-            Close();
+            return HardwareAccelerationMode.Required;
         }
+
+        return HardwareAccelerationMode.None;
     }
+
+    private static string DetermineCodec(CommandTemplate template)
+    {
+        if (!string.IsNullOrWhiteSpace(template.TargetCodec))
+        {
+            return FFmpegWebUI.Services.HardwareDetectionService.NormalizeCodec(template.TargetCodec);
+        }
+
+        if (!string.IsNullOrWhiteSpace(template.RequiredEncoder))
+        {
+            var profile = EncoderCatalog.Find(template.RequiredEncoder!);
+            if (profile != null) return profile.Codec;
+
+            var family = EncoderCatalog.ByFamily(template.RequiredEncoder!).FirstOrDefault();
+            if (family != null) return family.Codec;
+        }
+
+        var fromExtension = FFmpegWebUI.Services.HardwareDetectionService.NormalizeCodec(template.OutputExtension);
+        return fromExtension is "h264" or "hevc" or "av1" or "vp9" or "vp8" ? fromExtension : "h264";
+    }
+
+    private bool IsEncoderAvailable(string encoderName) =>
+        _report?.Encoders.Any(e => e.IsAvailable && string.Equals(e.Name, encoderName, StringComparison.OrdinalIgnoreCase)) == true;
+
+    private string DescribeEncoder(string encoderName)
+    {
+        var detected = _report?.Encoders
+            .FirstOrDefault(e => string.Equals(e.Name, encoderName, StringComparison.OrdinalIgnoreCase));
+
+        if (detected != null && !string.IsNullOrWhiteSpace(detected.DisplayName)) return detected.DisplayName;
+
+        return EncoderCatalog.Find(encoderName)?.DisplayName ?? encoderName;
+    }
+
+    private static string KindText(TemplateParameterKind kind) => kind switch
+    {
+        TemplateParameterKind.Select => "下拉选择",
+        TemplateParameterKind.Number => "数字",
+        TemplateParameterKind.Boolean => "开关",
+        _ => "文本"
+    };
 }
 
 <style>
-    .template-detail-viewer {
-        display: none;
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 1000;
-    }
-
-    .template-detail-viewer.visible {
-        display: block;
-    }
-
-    .viewer-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.5);
-    }
-
-    .viewer-panel {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        width: 90%;
-        max-width: 650px;
-        max-height: 90vh;
-        background: var(--card-bg, white);
-        border-radius: 8px;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        color: var(--text-primary, #333);
-    }
-
-    .viewer-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 1rem 1.5rem;
-        border-bottom: 1px solid var(--border-color, #ddd);
-        background: var(--light-bg, #f8f9fa);
-    }
-
-    .viewer-header h2 {
-        margin: 0;
-        font-size: 1.25rem;
-        color: var(--text-primary, #333);
-    }
-
-    .close-btn {
-        background: none;
-        border: none;
-        font-size: 1.5rem;
-        cursor: pointer;
-        color: var(--text-secondary, #666);
-    }
-
-    .close-btn:hover {
-        color: var(--text-primary, #333);
-    }
-
-    .viewer-body {
-        flex: 1;
-        padding: 1.5rem;
-        overflow-y: auto;
+    .body-alert {
+        margin-bottom: var(--spacing-3);
     }
 
     .detail-section {
-        margin-bottom: 1.5rem;
-        padding-bottom: 1rem;
-        border-bottom: 1px solid var(--border-color, #eee);
+        margin-bottom: var(--spacing-4);
+        padding-bottom: var(--spacing-3);
+        border-bottom: 1px solid var(--border-color);
     }
 
     .detail-section:last-child {
         border-bottom: none;
         margin-bottom: 0;
+        padding-bottom: 0;
     }
 
     .detail-row {
         display: flex;
-        margin-bottom: 0.75rem;
+        gap: var(--spacing-3);
+        margin-bottom: var(--spacing-2);
         align-items: flex-start;
     }
 
-    .detail-row.full {
-        flex-direction: column;
-    }
-
     .detail-row .label {
-        min-width: 120px;
+        min-width: 8.5rem;
         font-weight: 500;
-        color: var(--text-secondary, #666);
         font-size: 0.9rem;
+        color: var(--text-secondary);
     }
 
     .detail-row .value {
         flex: 1;
-        color: var(--text-primary, #333);
+        min-width: 0;
+        color: var(--text-primary);
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--spacing-2);
     }
 
     .detail-row .value.name {
-        font-size: 1.1rem;
+        font-size: 1.05rem;
         font-weight: 600;
     }
 
     .detail-row .value.desc {
         line-height: 1.5;
+        display: block;
     }
 
-    .detail-row .value .muted {
-        color: var(--text-muted, #888);
+    .detail-row .value.muted,
+    .muted {
+        color: var(--text-muted);
         font-style: italic;
+    }
+
+    .label-note {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        font-weight: 400;
+    }
+
+    .family-name {
+        font-weight: 600;
+    }
+
+    .hint {
+        display: block;
+        width: 100%;
+        font-size: 0.78rem;
+        color: var(--text-muted);
     }
 
     .command-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        margin-bottom: 0.5rem;
+        gap: var(--spacing-2);
+        margin-bottom: var(--spacing-2);
     }
 
-    .copy-btn-header {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        padding: 0.4rem 0.75rem;
-        background: #007bff;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        font-size: 0.8rem;
-        cursor: pointer;
-        transition: all 0.2s;
+    .command-header .label {
+        font-size: 0.9rem;
+        font-weight: 500;
+        color: var(--text-secondary);
     }
 
-    .copy-btn-header:hover {
-        background: #0056b3;
-    }
-
-    .copy-btn-header.copied {
-        background: #28a745;
-    }
-
-    .command-box {
+    .preview-header {
+        margin-top: var(--spacing-3);
     }
 
     .command-box code {
         display: block;
-        padding: 1rem;
-        background: var(--input-bg, #f5f5f5);
-        border: 1px solid var(--border-color, #ddd);
-        border-radius: 4px;
-        font-family: 'Consolas', 'Monaco', monospace;
-        font-size: 0.85rem;
+        padding: var(--spacing-3);
+        background: var(--code-bg);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
         line-height: 1.5;
+        color: var(--text-primary);
         word-break: break-all;
         white-space: pre-wrap;
-        color: var(--text-primary, #333);
     }
 
-    .badge {
-        display: inline-block;
-        padding: 0.2rem 0.5rem;
-        border-radius: 4px;
+    .command-box.preview code {
+        border-color: var(--primary-color);
+    }
+
+    .warning-list {
+        margin: var(--spacing-2) 0 0;
+        padding-left: 1.2rem;
         font-size: 0.8rem;
+        color: var(--warning-text);
     }
 
-    .badge.system {
-        background: #e9ecef;
-        color: #495057;
-    }
-
-    .badge.user {
-        background: #d4edda;
-        color: #155724;
-    }
-
-    .badge.hw {
-        background: #cce5ff;
-        color: #004085;
-    }
-
-    .viewer-footer {
+    .param-readonly {
+        margin: 0;
+        padding: 0;
+        list-style: none;
         display: flex;
-        justify-content: flex-end;
-        gap: 0.75rem;
-        padding: 1rem 1.5rem;
-        border-top: 1px solid var(--border-color, #ddd);
-        background: var(--light-bg, #f8f9fa);
+        flex-direction: column;
+        gap: var(--spacing-2);
     }
 
-    .btn-copy,
-    .btn-edit,
-    .btn-secondary {
-        padding: 0.6rem 1.25rem;
-        border-radius: 4px;
-        font-size: 0.95rem;
-        cursor: pointer;
+    .param-readonly li {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: var(--spacing-2);
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--surface-3);
+        border-radius: var(--radius-sm);
     }
 
-    .btn-copy {
-        background: #28a745;
-        color: white;
-        border: none;
+    .param-name {
+        font-weight: 600;
+        color: var(--text-primary);
     }
 
-    .btn-copy:hover {
-        background: #218838;
+    .param-kind,
+    .param-default {
+        font-size: 0.78rem;
+        color: var(--text-muted);
     }
 
-    .btn-edit {
-        background: #007bff;
-        color: white;
-        border: none;
+    .param-desc {
+        width: 100%;
+        font-size: 0.8rem;
+        color: var(--text-secondary);
     }
 
-    .btn-edit:hover {
-        background: #0056b3;
+    .footer-left {
+        margin-right: auto;
     }
 
-    .btn-secondary {
-        background: var(--light-bg, #f8f9fa);
-        border: 1px solid var(--border-color, #ddd);
-        color: var(--text-primary, #333);
-    }
-
-    .btn-secondary:hover {
-        background: var(--card-bg, #e9ecef);
+    .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
     }
 </style>

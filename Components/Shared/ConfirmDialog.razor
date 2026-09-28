@@ -1,0 +1,89 @@
+
+<Modal IsOpen="IsOpen" IsOpenChanged="OnOpenChanged" Title="@Title" Size="sm"
+       CloseOnBackdrop="@(!IsBusy)" DisableClose="@IsBusy">
+    <div class="confirm-body">
+            <div class="confirm-icon" aria-hidden="true">@(Danger ? "⚠️" : "❓")</div>
+            <div class="confirm-text">
+                <p class="confirm-message">@Message</p>
+                @if (!string.IsNullOrEmpty(Detail))
+                {
+                    <p class="confirm-detail">@Detail</p>
+                }
+            </div>
+    </div>
+
+    <div class="ffui-modal-footer">
+        <button type="button" class="ffui-btn" disabled="@IsBusy" @onclick="CancelAsync">@CancelText</button>
+        <button type="button" class="ffui-btn @(Danger ? "ffui-btn-danger" : "ffui-btn-primary")"
+                disabled="@IsBusy" @onclick="ConfirmAsync">
+            @if (IsBusy)
+            {
+                <span class="spinner" aria-hidden="true"></span>
+            }
+            @ConfirmText
+        </button>
+    </div>
+</Modal>
+
+<style>
+    .confirm-body { display: flex; gap: 0.9rem; align-items: flex-start; }
+    .confirm-icon { font-size: 1.6rem; line-height: 1.2; }
+    .confirm-text { flex: 1; }
+    .confirm-message { margin: 0; color: var(--text-primary); }
+    .confirm-detail { margin: 0.5rem 0 0; color: var(--text-muted); font-size: 0.86rem; word-break: break-all; }
+</style>
+
+@code {
+    /// <summary>是否显示</summary>
+    [Parameter] public bool IsOpen { get; set; }
+
+    /// <summary>显示状态变化回调</summary>
+    [Parameter] public EventCallback<bool> IsOpenChanged { get; set; }
+
+    /// <summary>标题</summary>
+    [Parameter] public string Title { get; set; } = "确认操作";
+
+    /// <summary>正文</summary>
+    [Parameter] public string Message { get; set; } = string.Empty;
+
+    /// <summary>补充说明（例如完整路径）</summary>
+    [Parameter] public string? Detail { get; set; }
+
+    /// <summary>确认按钮文本</summary>
+    [Parameter] public string ConfirmText { get; set; } = "确定";
+
+    /// <summary>取消按钮文本</summary>
+    [Parameter] public string CancelText { get; set; } = "取消";
+
+    /// <summary>是否为危险操作（红色按钮）</summary>
+    [Parameter] public bool Danger { get; set; }
+
+    /// <summary>确认回调</summary>
+    [Parameter] public EventCallback OnConfirm { get; set; }
+
+    /// <summary>取消回调</summary>
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    /// <summary>是否正在处理（禁用按钮并显示进度）</summary>
+    [Parameter] public bool IsBusy { get; set; }
+
+    private async Task OnOpenChanged(bool value)
+    {
+        IsOpen = value;
+        await IsOpenChanged.InvokeAsync(value);
+        if (!value) await OnCancel.InvokeAsync();
+    }
+
+    private async Task ConfirmAsync()
+    {
+        await OnConfirm.InvokeAsync();
+    }
+
+    private async Task CancelAsync()
+    {
+        IsOpen = false;
+        await IsOpenChanged.InvokeAsync(false);
+        await OnCancel.InvokeAsync();
+    }
+
+}

@@ -1,32 +1,79 @@
+@using System.Text
+@using System.Text.RegularExpressions
+@inject IJSRuntime JS
+@inject IToastService Toast
+@implements IDisposable
+
 <div class="log-viewer">
     <div class="log-header">
-        <span class="log-title">📜 FFmpeg 日志</span>
+        <span class="log-title" id="@_titleId">
+            <span aria-hidden="true">📜</span> @TitleText
+        </span>
+
         <div class="log-actions">
-            <input type="text" 
-                   placeholder="搜索..." 
-                   @bind="_searchText"
-                   @bind:event="oninput"
-                   class="search-input" />
-            <button class="btn-icon" title="复制日志" @onclick="CopyLog">📋</button>
-            <button class="btn-icon" title="清空" @onclick="Clear">🗑️</button>
+            <label class="visually-hidden" for="@_searchId">搜索日志</label>
+            <input id="@_searchId"
+                   type="search"
+                   class="search-input"
+                   placeholder="搜索..."
+                   value="@_searchText"
+                   @oninput="OnSearchInput" />
+
+            <label class="visually-hidden" for="@_filterId">日志级别筛选</label>
+            <select id="@_filterId" class="filter-select" aria-label="日志级别筛选"
+                    value="@_filterLevel" @onchange="OnFilterChanged">
+                <option value="@LogFilter.All">全部</option>
+                <option value="@LogFilter.Errors">仅错误</option>
+                <option value="@LogFilter.Warnings">仅警告</option>
+            </select>
+
+            <button type="button" class="ffui-icon-btn" aria-label="复制日志" title="复制日志"
+                    @onclick="CopyLogAsync">
+                <span aria-hidden="true">@(_copyOk ? "✓" : "📋")</span>
+            </button>
+
+            <button type="button" class="ffui-icon-btn" aria-label="下载日志" title="下载日志"
+                    @onclick="DownloadLogAsync">
+                <span aria-hidden="true">⬇️</span>
+            </button>
+
+            <button type="button" class="ffui-icon-btn" aria-label="清空显示的日志" title="清空"
+                    @onclick="ClearLog">
+                <span aria-hidden="true">🗑️</span>
+            </button>
+
             <label class="auto-scroll">
-                <input type="checkbox" @bind="_autoScroll" /> 自动滚动
+                <input type="checkbox" @bind="_autoScroll" @bind:after="OnAutoScrollChanged" />
+                <span>自动滚动</span>
             </label>
         </div>
     </div>
 
-    <div class="log-content" @ref="_logContainer">
-        @if (_filteredLines.Count == 0)
+    @if (_jsError is not null)
+    {
+        <div class="log-notice ffui-alert ffui-alert-warning" role="status">@_jsError</div>
+    }
+
+    <div class="log-content" @ref="_logContainer" role="log" aria-live="off"
+         aria-labelledby="@_titleId" style="@MaxHeightStyle">
+        @if (_cleared)
         {
-            <div class="empty-log">暂无日志输出</div>
+            <div class="empty-log">
+                <span>日志已清空（新日志仍会继续显示）</span>
+                <button type="button" class="ffui-btn ffui-btn-sm" @onclick="RestoreCleared">恢复显示</button>
+            </div>
+        }
+        else if (_filteredLines.Count == 0)
+        {
+            <div class="empty-log">@(_lines.Count == 0 ? "暂无日志输出" : "没有符合当前搜索/筛选条件的日志行")</div>
         }
         else
         {
-            @foreach (var (line, index) in _filteredLines.Select((l, i) => (l, i)))
+            @foreach (var line in _filteredLines)
             {
-                <div class="log-line @GetLineClass(line)">
-                    <span class="line-number">@(index + 1)</span>
-                    <span class="line-content">@HighlightSearch(line)</span>
+                <div class="log-line @GetLineClass(line.Text)" @key="line.Number">
+                    <span class="line-number" aria-hidden="true">@line.Number</span>
+                    <span class="line-content">@Highlight(line.Text)</span>
                 </div>
             }
         }
@@ -34,110 +81,396 @@
 
     <div class="log-footer">
         <span>共 @_lines.Count 行</span>
-        @if (!string.IsNullOrEmpty(_searchText))
+        @if (!_cleared && _filteredLines.Count != _lines.Count)
         {
-            <span>| 匹配 @_filteredLines.Count 行</span>
+            <span>· 显示 @_filteredLines.Count 行</span>
+        }
+        @if (!string.IsNullOrEmpty(_appliedSearch) || _filterLevel != LogFilter.All)
+        {
+            <span>· 匹配 @_filteredLines.Count 行</span>
+        }
+        @if (_cleared)
+        {
+            <span>· 已清空显示</span>
         }
     </div>
 </div>
 
 @code {
-    private List<string> _lines = [];
+    /// <summary>搜索输入防抖时长（毫秒）</summary>
+    private const int SearchDebounceMs = 250;
+
+    /// <summary>一条带原始行号的日志行</summary>
+    private readonly record struct LogLine(int Number, string Text);
+
+    /// <summary>日志级别筛选</summary>
+    private enum LogFilter
+    {
+        All = 0,
+        Errors = 1,
+        Warnings = 2
+    }
+
+    /// <summary>错误行判定：按单词边界匹配，避免把文件名里的 error/failed 也染色</summary>
+    private static readonly Regex ErrorPattern = new(
+        @"\b(error|errors|failed|failure|invalid|fatal|unable|cannot|not found|no such file)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>警告行判定：同样按单词边界匹配</summary>
+    private static readonly Regex WarningPattern = new(
+        @"\b(warning|warnings|warn|deprecated)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private readonly string _uid = Guid.NewGuid().ToString("N")[..8];
+
+    /// <summary>原始日志行（未过滤、未清空）</summary>
+    private readonly List<string> _lines = [];
+
+    /// <summary>当前渲染用的行（按搜索/筛选算好，每次渲染只算一次）</summary>
+    private List<LogLine> _filteredLines = [];
+
     private string _searchText = string.Empty;
+    private string _appliedSearch = string.Empty;
+    private LogFilter _filterLevel = LogFilter.All;
+
     private bool _autoScroll = true;
+    private bool _autoScrollParameter = true;
+
+    /// <summary>上次解析过的 LogText：只有它真的变了才重建 _lines，否则「清空」会被撤销</summary>
+    private string? _lastLogText;
+
+    private bool _cleared;
+    /// <summary>清空时被隐藏的日志内容，用于判断后续是不是换了一条全新的日志流</summary>
+    private string? _clearedMarker;
+
+    private bool _filterInitialized;
+    private bool _copyOk;
+    private bool _jsInitialized;
+    private bool _initPending = true;
+    private string? _jsError;
+    private bool _scrollErrorShown;
+    private bool _disposed;
+
+    private int _searchVersion;
+    private int _lastScrolledCount = -1;
+
     private ElementReference _logContainer;
 
     [Parameter]
     public string LogText { get; set; } = string.Empty;
 
+    /// <summary>标题。为空时使用默认标题</summary>
+    [Parameter]
+    public string? Title { get; set; }
+
+    /// <summary>日志区最大高度（CSS 长度，如 "400px"）。为空时不限制</summary>
+    [Parameter]
+    public string? MaxHeight { get; set; }
+
+    /// <summary>是否开启自动滚动（只作为初始值，用户可在界面上切换）</summary>
+    [Parameter]
+    public bool AutoScroll { get; set; } = true;
+
+    /// <summary>最多保留的行数（保留旧参数以兼容既有页面）</summary>
     [Parameter]
     public int MaxLines { get; set; } = 1000;
 
-    [Inject]
-    private IJSRuntime JS { get; set; } = default!;
+    private string _searchId => $"ffui-log-{_uid}-search";
+    private string _filterId => $"ffui-log-{_uid}-filter";
+    private string _titleId => $"ffui-log-{_uid}-title";
 
-    private List<string> _filteredLines => string.IsNullOrEmpty(_searchText)
-        ? _lines
-        : _lines.Where(l => l.Contains(_searchText, StringComparison.OrdinalIgnoreCase)).ToList();
+    private string TitleText => string.IsNullOrWhiteSpace(Title) ? "FFmpeg 日志" : Title;
+
+    private string? MaxHeightStyle =>
+        string.IsNullOrWhiteSpace(MaxHeight) ? null : $"max-height:{MaxHeight};";
 
     protected override void OnParametersSet()
     {
-        if (!string.IsNullOrEmpty(LogText))
+        if (AutoScroll != _autoScrollParameter)
         {
-            _lines = LogText.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                .TakeLast(MaxLines)
-                .ToList();
+            _autoScrollParameter = AutoScroll;
+            _autoScroll = AutoScroll;
+            _initPending = true; // 渲染后把「贴底」状态同步给 JS
+        }
+
+        var text = LogText ?? string.Empty;
+        var textChanged = !string.Equals(text, _lastLogText, StringComparison.Ordinal);
+
+        if (textChanged)
+        {
+            _lastLogText = text;
+            _lines.Clear();
+
+            if (text.Length > 0)
+            {
+                var limit = Math.Max(1, MaxLines);
+                _lines.AddRange(text
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                    .TakeLast(limit)
+                    .Select(l => l.TrimEnd('\r')));
+            }
+
+            // 换了另一条日志流（不是同一条日志继续追加）时自动恢复显示
+            if (_cleared && _clearedMarker is not null &&
+                !text.StartsWith(_clearedMarker, StringComparison.Ordinal))
+            {
+                _cleared = false;
+                _clearedMarker = null;
+            }
+        }
+
+        if (textChanged || !_filterInitialized)
+        {
+            _filterInitialized = true;
+            RebuildFilteredLines();
         }
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (_autoScroll && _logContainer.Id != null)
+        if (_disposed) return;
+
+        if (firstRender || _initPending)
         {
+            _initPending = false;
             try
             {
-                await JS.InvokeVoidAsync("eval", 
-                    $"document.querySelector('.log-content')?.scrollTo(0, document.querySelector('.log-content')?.scrollHeight)");
+                await JS.InvokeVoidAsync("ffui.initLogScroll", _logContainer, _autoScroll);
+                _jsInitialized = true;
             }
-            catch
+            catch (Exception ex)
             {
-                // 忽略 JS 调用异常
+                // 脚本不可用（CSP、预渲染等）：降级为「不自动滚动」，并给出一次可见提示
+                _jsInitialized = false;
+                if (_jsError is null)
+                {
+                    _jsError = "自动滚动初始化失败，日志仍可查看，但不会自动滚到底部。";
+                    Toast.Warning($"{_jsError}（{ex.Message}）");
+                }
+                return;
             }
         }
-    }
 
-    public void AppendLine(string line)
-    {
-        _lines.Add(line);
-        if (_lines.Count > MaxLines)
-        {
-            _lines.RemoveAt(0);
-        }
-        StateHasChanged();
-    }
+        var visibleCount = _cleared ? 0 : _filteredLines.Count;
 
-    public void Clear()
-    {
-        _lines.Clear();
-        StateHasChanged();
-    }
+        // 只有行数真的变化时才调用滚动，避免每次渲染都跑一遍 JS
+        if (!_jsInitialized || visibleCount == _lastScrolledCount) return;
+        _lastScrolledCount = visibleCount;
 
-    private async Task CopyLog()
-    {
+        if (!_autoScroll) return;
+
         try
         {
-            var text = string.Join("\n", _filteredLines);
-            await JS.InvokeVoidAsync("navigator.clipboard.writeText", text);
+            await JS.InvokeVoidAsync("ffui.scrollToBottom", _logContainer);
         }
-        catch
+        catch (Exception ex)
         {
-            // 剪贴板访问可能被拒绝
+            if (_scrollErrorShown) return;
+            _scrollErrorShown = true;
+            Toast.Warning($"自动滚动失败：{ex.Message}");
         }
     }
 
+    private Task OnAutoScrollChanged()
+    {
+        _initPending = true; // 下一次渲染后同步给 JS
+        if (_autoScroll) _lastScrolledCount = -1; // 重新打开时立即滚到底部
+        return Task.CompletedTask;
+    }
+
+    private async Task OnSearchInput(ChangeEventArgs e)
+    {
+        _searchText = e.Value?.ToString() ?? string.Empty;
+
+        // 防抖：连续输入只对最后一次生效（用版本号而不是取消令牌，避免残留计时器）
+        var version = ++_searchVersion;
+        await Task.Delay(SearchDebounceMs);
+
+        if (_disposed || version != _searchVersion) return;
+
+        _appliedSearch = _searchText;
+        RebuildFilteredLines();
+    }
+
+    private void OnFilterChanged(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        _filterLevel = Enum.TryParse<LogFilter>(value, ignoreCase: true, out var parsed)
+            ? parsed
+            : LogFilter.All;
+        RebuildFilteredLines();
+    }
+
+    /// <summary>按筛选级别 + 搜索词重算渲染行，只在数据/条件变化时调用一次</summary>
+    private void RebuildFilteredLines()
+    {
+        var query = _appliedSearch;
+        var level = _filterLevel;
+        var result = new List<LogLine>(_lines.Count);
+
+        for (var i = 0; i < _lines.Count; i++)
+        {
+            var line = _lines[i];
+            if (level != LogFilter.All && GetLineClass(line) != (level == LogFilter.Errors ? "error" : "warning"))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(query) &&
+                !line.Contains(query, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            result.Add(new LogLine(i + 1, line));
+        }
+
+        _filteredLines = result;
+    }
+
+    private void ClearLog()
+    {
+        _cleared = true;
+        _clearedMarker = _lastLogText;
+        _lastScrolledCount = 0;
+        StateHasChanged();
+    }
+
+    private void RestoreCleared()
+    {
+        _cleared = false;
+        _clearedMarker = null;
+        StateHasChanged();
+    }
+
+    private async Task CopyLogAsync()
+    {
+        var visibleLines = _cleared ? new List<LogLine>() : _filteredLines;
+        var text = string.Join("\n", visibleLines.Select(l => l.Text));
+        if (string.IsNullOrEmpty(text))
+        {
+            Toast.Warning("没有可复制的日志。");
+            return;
+        }
+
+        try
+        {
+            var ok = await JS.InvokeAsync<bool>("ffui.copyText", text);
+            if (!ok)
+            {
+                Toast.Error("复制失败，可能是浏览器不允许访问剪贴板（非安全来源）。可手动选中文本复制。");
+                return;
+            }
+
+            Toast.Success("日志已复制到剪贴板。");
+            _ = ShowCopiedAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"复制失败：{ex.Message}。可手动选中文本复制。");
+        }
+    }
+
+    private async Task ShowCopiedAsync()
+    {
+        _copyOk = true;
+        _ = InvokeAsync(StateHasChanged);
+
+        await Task.Delay(1500);
+
+        if (_disposed) return;
+        _copyOk = false;
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    private async Task DownloadLogAsync()
+    {
+        if (_lines.Count == 0)
+        {
+            Toast.Warning("暂无日志可下载。");
+            return;
+        }
+
+        var content = string.Join(Environment.NewLine, _lines);
+        var fileName = $"ffmpeg-log-{DateTime.Now:yyyyMMdd-HHmmss}.txt";
+
+        try
+        {
+            var ok = await JS.InvokeAsync<bool>("ffui.saveTextFile", fileName, content, "text/plain;charset=utf-8");
+            if (ok)
+            {
+                Toast.Success($"日志已保存为 {fileName}");
+            }
+            else
+            {
+                Toast.Error("日志下载失败：浏览器拒绝了下载操作。");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Error($"日志下载失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>行着色：错误/警告按单词边界匹配，避免文件名里的 error/failed 被误判</summary>
     private static string GetLineClass(string line)
     {
-        if (line.Contains("error", StringComparison.OrdinalIgnoreCase) ||
-            line.Contains("failed", StringComparison.OrdinalIgnoreCase))
-            return "error";
-        if (line.Contains("warning", StringComparison.OrdinalIgnoreCase))
-            return "warning";
-        if (line.Contains("time=") || line.Contains("speed="))
+        if (string.IsNullOrEmpty(line)) return string.Empty;
+
+        if (ErrorPattern.IsMatch(line)) return "error";
+        if (WarningPattern.IsMatch(line)) return "warning";
+        if (line.Contains("time=", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("speed=", StringComparison.OrdinalIgnoreCase))
+        {
             return "progress";
-        return "";
+        }
+        return string.Empty;
     }
 
-    private MarkupString HighlightSearch(string line)
+    /// <summary>
+    /// 搜索高亮：先按「区分大小写的原文」切分，再对每段分别做 HTML 编码，
+    /// 只把命中的片段包进 &lt;mark&gt;。这样 &amp; &lt; &gt; " ' 都不会被破坏，
+    /// 也能保留原文大小写（搜索本身是字面量、不区分大小写的）。
+    /// </summary>
+    private MarkupString Highlight(string line)
     {
-        if (string.IsNullOrEmpty(_searchText))
+        var query = _appliedSearch;
+        if (string.IsNullOrEmpty(query) || string.IsNullOrEmpty(line))
+        {
             return new MarkupString(System.Web.HttpUtility.HtmlEncode(line));
+        }
 
-        var encoded = System.Web.HttpUtility.HtmlEncode(line);
-        var highlighted = encoded.Replace(
-            _searchText,
-            $"<mark>{_searchText}</mark>",
-            StringComparison.OrdinalIgnoreCase);
-        return new MarkupString(highlighted);
+        var builder = new StringBuilder(line.Length + 16);
+        var index = 0;
+
+        while (index < line.Length)
+        {
+            var match = line.IndexOf(query, index, StringComparison.OrdinalIgnoreCase);
+            if (match < 0)
+            {
+                builder.Append(System.Web.HttpUtility.HtmlEncode(line[index..]));
+                break;
+            }
+
+            if (match > index)
+            {
+                builder.Append(System.Web.HttpUtility.HtmlEncode(line[index..match]));
+            }
+
+            builder.Append("<mark>")
+                   .Append(System.Web.HttpUtility.HtmlEncode(line.Substring(match, query.Length)))
+                   .Append("</mark>");
+
+            index = match + query.Length;
+        }
+
+        return new MarkupString(builder.ToString());
+    }
+
+    public void Dispose()
+    {
+        // 标记已释放：尚未回填的防抖/✓ 提示等延迟任务会自行退出，不再触碰渲染状态
+        _disposed = true;
     }
 }
 
@@ -146,109 +479,116 @@
         display: flex;
         flex-direction: column;
         height: 100%;
-        min-height: 300px;
-        border: 1px solid #ddd;
-        border-radius: 8px;
+        min-height: 240px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
         overflow: hidden;
-        background: #1e1e1e;
-        color: #d4d4d4;
-        font-family: 'Consolas', 'Monaco', monospace;
+        background: var(--code-bg);
+        color: var(--text-primary);
+        font-size: 0.85rem;
     }
 
     .log-header {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 0.5rem 1rem;
-        background: #333;
-        border-bottom: 1px solid #444;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        padding: 0.4rem 0.75rem;
+        background: var(--surface-3);
+        border-bottom: 1px solid var(--border-color);
     }
 
     .log-title {
         font-weight: 500;
-        color: #fff;
+        color: var(--text-primary);
     }
 
     .log-actions {
         display: flex;
-        gap: 0.5rem;
+        gap: 0.4rem;
         align-items: center;
+        flex-wrap: wrap;
     }
 
-    .search-input {
-        padding: 0.25rem 0.5rem;
-        border: 1px solid #555;
-        border-radius: 4px;
-        background: #2d2d2d;
-        color: #fff;
-        font-size: 0.85rem;
+    /* 全局 input[type="search"] 规则是 width:100%，这里需要更高的特异性 */
+    .log-actions input.search-input {
         width: 150px;
+        flex: 0 1 150px;
+        padding: 0.25rem 0.5rem;
+        font-size: 0.8rem;
     }
 
-    .btn-icon {
-        background: none;
-        border: none;
-        cursor: pointer;
-        font-size: 1rem;
-        opacity: 0.7;
-        transition: opacity 0.2s;
-    }
-
-    .btn-icon:hover {
-        opacity: 1;
+    .log-actions .filter-select {
+        width: auto;
+        padding: 0.25rem 0.4rem;
+        font-size: 0.8rem;
     }
 
     .auto-scroll {
         display: flex;
         align-items: center;
         gap: 0.25rem;
-        font-size: 0.85rem;
-        color: #aaa;
+        font-size: 0.8rem;
+        color: var(--text-secondary);
         cursor: pointer;
+        white-space: nowrap;
+    }
+
+    .log-notice {
+        margin: 0.5rem 0.75rem 0;
+        font-size: 0.8rem;
     }
 
     .log-content {
         flex: 1;
         overflow-y: auto;
         padding: 0.5rem 0;
+        font-family: var(--font-mono);
+        background: var(--code-bg);
     }
 
     .empty-log {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.6rem;
+        flex-wrap: wrap;
         text-align: center;
-        padding: 2rem;
-        color: #666;
+        padding: 2rem 1rem;
+        color: var(--text-muted);
     }
 
     .log-line {
         display: flex;
-        padding: 0.1rem 1rem;
-        font-size: 0.85rem;
+        padding: 0.1rem 0.75rem;
         line-height: 1.5;
     }
 
-    .log-line:hover {
-        background: #2d2d2d;
+    /* 悬停高亮不能盖掉错误/警告行的语义底色 */
+    .log-line:hover:not(.error):not(.warning) {
+        background: var(--surface-3);
     }
 
     .log-line.error {
-        background: rgba(220, 53, 69, 0.2);
-        color: #f8d7da;
+        background: var(--danger-bg);
+        color: var(--danger-text);
     }
 
     .log-line.warning {
-        background: rgba(255, 193, 7, 0.2);
-        color: #fff3cd;
+        background: var(--warning-bg);
+        color: var(--warning-text);
     }
 
     .log-line.progress {
-        color: #98c379;
+        color: var(--info-text);
     }
 
     .line-number {
-        min-width: 40px;
+        min-width: 44px;
         text-align: right;
-        margin-right: 1rem;
-        color: #666;
+        margin-right: 0.75rem;
+        color: var(--text-muted);
         user-select: none;
     }
 
@@ -258,17 +598,20 @@
     }
 
     .line-content mark {
-        background: #ffeb3b;
-        color: #000;
+        background: var(--warning-bg);
+        color: var(--warning-text);
         padding: 0 2px;
         border-radius: 2px;
     }
 
     .log-footer {
-        padding: 0.5rem 1rem;
-        background: #333;
-        border-top: 1px solid #444;
-        font-size: 0.8rem;
-        color: #888;
+        display: flex;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+        padding: 0.35rem 0.75rem;
+        background: var(--surface-3);
+        border-top: 1px solid var(--border-color);
+        font-size: 0.78rem;
+        color: var(--text-muted);
     }
 </style>

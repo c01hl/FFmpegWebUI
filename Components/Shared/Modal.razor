@@ -1,0 +1,102 @@
+@inject IJSRuntime JS
+@implements IDisposable
+
+@*
+    通用模态框。只有一个渲染片段（隐式 ChildContent），
+    这样调用方既可以直接写内容，也可以显式用 <ChildContent>。
+    需要「底部按钮栏」时，在内容末尾放
+    <div class="ffui-modal-footer">...</div> 即可（见 app.css）。
+*@
+
+@if (IsOpen)
+{
+    <div class="ffui-modal-backdrop" @onclick="OnBackdropClick" role="presentation">
+        <div class="ffui-modal @SizeClass" role="dialog" aria-modal="true"
+             aria-labelledby="@_titleId" @onclick:stopPropagation="true" tabindex="-1" @ref="_dialogElement">
+
+            <div class="ffui-modal-header">
+                <h2 id="@_titleId">@Title</h2>
+                <button type="button" class="ffui-icon-btn" aria-label="关闭对话框"
+                        disabled="@DisableClose" @onclick="CloseAsync">✕</button>
+            </div>
+
+            <div class="ffui-modal-body">
+                @ChildContent
+            </div>
+        </div>
+    </div>
+}
+
+<style>
+    .ffui-modal-sm { width: min(420px, 100%); }
+    .ffui-modal-md { width: min(720px, 100%); }
+    .ffui-modal-lg { width: min(1040px, 100%); }
+    .ffui-modal-xl { width: min(1320px, 100%); }
+
+    /* .ffui-modal-footer 的样式定义在 wwwroot/app.css（全局），
+       因为 .razor 内联样式块不支持 ::deep，写在这里会被浏览器当成非法选择器丢弃。 */
+</style>
+
+@code {
+    /// <summary>对话框标题</summary>
+    [Parameter] public string Title { get; set; } = string.Empty;
+
+    /// <summary>是否显示</summary>
+    [Parameter] public bool IsOpen { get; set; }
+
+    /// <summary>显示状态变化回调（用于 @bind-IsOpen）</summary>
+    [Parameter] public EventCallback<bool> IsOpenChanged { get; set; }
+
+    /// <summary>尺寸：sm / md / lg / xl</summary>
+    [Parameter] public string Size { get; set; } = "md";
+
+    /// <summary>点击遮罩是否关闭</summary>
+    [Parameter] public bool CloseOnBackdrop { get; set; } = true;
+
+    /// <summary>是否禁用关闭（例如正在保存）</summary>
+    [Parameter] public bool DisableClose { get; set; }
+
+    /// <summary>内容</summary>
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    private readonly string _titleId = $"ffui-modal-title-{Guid.NewGuid():N}";
+    private ElementReference _dialogElement;
+    private bool _wasOpen;
+
+    private string SizeClass => Size?.ToLowerInvariant() switch
+    {
+        "sm" => "ffui-modal-sm",
+        "lg" => "ffui-modal-lg",
+        "xl" => "ffui-modal-xl",
+        _ => "ffui-modal-md"
+    };
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (IsOpen && !_wasOpen)
+        {
+            _wasOpen = true;
+            // 打开后把焦点移进对话框，键盘用户不会落到背后的页面上
+            try { await JS.InvokeVoidAsync("ffui.focusElement", _dialogElement); } catch { }
+        }
+        else if (!IsOpen)
+        {
+            _wasOpen = false;
+        }
+    }
+
+    private async Task OnBackdropClick()
+    {
+        if (CloseOnBackdrop && !DisableClose) await CloseAsync();
+    }
+
+    /// <summary>关闭对话框</summary>
+    public async Task CloseAsync()
+    {
+        if (DisableClose) return;
+        IsOpen = false;
+        await IsOpenChanged.InvokeAsync(false);
+    }
+
+    public void Dispose() => _wasOpen = false;
+}
