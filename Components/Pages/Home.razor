@@ -511,6 +511,53 @@
         gap: 0.5rem;
         margin-top: 0.7rem;
     }
+
+    /* Stronger visual hierarchy while retaining the existing theme tokens */
+    .hero {
+        position: relative;
+        overflow: hidden;
+        padding: clamp(1.15rem, 2.5vw, 1.8rem);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-lg);
+        background: linear-gradient(120deg, var(--card-bg) 28%, var(--primary-light) 160%);
+        box-shadow: var(--shadow-sm);
+    }
+    .hero::after {
+        content: "";
+        position: absolute;
+        top: -5rem;
+        right: 22%;
+        width: 13rem;
+        height: 13rem;
+        border: 1px solid color-mix(in srgb, var(--primary-color) 18%, transparent);
+        border-radius: 50%;
+        pointer-events: none;
+    }
+    .hero-text, .hero-actions { position: relative; z-index: 1; }
+    .hero-text h1 { font-size: clamp(1.55rem, 2.4vw, 2rem); letter-spacing: -0.035em; }
+    .hero-sub { margin-top: 0.45rem; }
+    .hero-actions { gap: 0.55rem; }
+    .home > .ffui-panel {
+        padding: clamp(1rem, 2vw, 1.4rem);
+        box-shadow: var(--shadow-sm);
+    }
+    .status-grid { gap: 0.65rem; }
+    .status-item {
+        padding: 0.75rem 0.85rem;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        background: var(--surface-3);
+    }
+    .status-item dt { font-weight: 550; }
+    .recent-table tbody tr { transition: background 0.12s ease; }
+    .recent-table tbody tr:hover { background: var(--surface-3); }
+    @media (max-width: 640px) {
+        .hero { align-items: flex-start; }
+        .hero-actions { width: 100%; }
+        .hero-actions .ffui-btn { flex: 1 1 auto; }
+        .hero::after { right: -4rem; }
+    }
+
 </style>
 
 @code {
